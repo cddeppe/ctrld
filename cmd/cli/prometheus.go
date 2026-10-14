@@ -49,6 +49,18 @@ var statsClientQueriesCount = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Help: "Total number queries of a client.",
 }, []string{metricsLabelClientSourceIP, metricsLabelClientMac, metricsLabelClientHostname})
 
+// statsCachePrefetchRefreshes counts the number of times the cache prefetcher
+// has scheduled a background refresh of a near-expiry cache entry. Includes
+// refreshes that were coalesced into an in-flight singleflight call (those
+// count as a "scheduled" attempt even though no upstream query was issued).
+//
+// Exposed unconditionally (whenever the metrics server is enabled) so it can
+// be monitored independently of MetricsQueryStats.
+var statsCachePrefetchRefreshes = prometheus.NewCounter(prometheus.CounterOpts{
+	Name: "ctrld_cache_prefetch_refreshes_total",
+	Help: "Total number of cache prefetch refreshes triggered by near-expiry cache hits.",
+})
+
 // WithLabelValuesInc increases prometheus counter by 1 if query stats is enabled.
 func (p *prog) WithLabelValuesInc(c *prometheus.CounterVec, lvs ...string) {
 	if p.metricsQueryStats.Load() {

@@ -116,6 +116,7 @@ type prog struct {
 	appCallback               *AppCallback
 	cache                     dnscache.Cacher
 	cacheFlushDomainsMap      map[string]struct{}
+	prefetcher                *prefetcher
 	sema                      semaphore
 	ciTable                   *clientinfo.Table
 	um                        *upstreamMonitor
@@ -519,6 +520,13 @@ func (p *prog) run(reload bool, reloadCh chan struct{}) {
 	// context for managing spawn goroutines.
 	ctx, cancelFunc := context.WithCancel(context.Background())
 	defer cancelFunc()
+
+	// Initialize the cache prefetcher. Bound to ctx so in-flight prefetch
+	// goroutines are cancelled on reload/stop. newPrefetcher returns a
+	// disabled stub when caching is off, so p.prefetcher is always non-nil
+	// and dns_proxy.go can call maybePrefetch unconditionally.
+	p.prefetcher = newPrefetcher(p)
+	p.prefetcher.ctx = ctx
 
 	// Newer versions of android and iOS denies permission which breaks connectivity.
 	if !isMobile() && !reload {

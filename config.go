@@ -220,6 +220,17 @@ type ServiceConfig struct {
 	CacheTTLOverride        int            `mapstructure:"cache_ttl_override" toml:"cache_ttl_override,omitempty"`
 	CacheServeStale         bool           `mapstructure:"cache_serve_stale" toml:"cache_serve_stale,omitempty"`
 	CacheFlushDomains       []string       `mapstructure:"cache_flush_domains" toml:"cache_flush_domains" validate:"max=256"`
+	// CachePrefetchThreshold is the fraction of original TTL remaining at
+	// which ctrld will asynchronously refresh a cached entry. 0.25 means
+	// "refresh when 25% of the original TTL remains". Default 0.25 when
+	// cache_enable is true. Set to 0 to explicitly disable prefetch even
+	// when caching is on. Must be in (0, 1) to take effect.
+	CachePrefetchThreshold *float64 `mapstructure:"cache_prefetch_threshold" toml:"cache_prefetch_threshold,omitempty" validate:"omitempty,gt=0,lt=1"`
+	// CachePrefetchMinTTL is the minimum original TTL (in seconds) for an
+	// entry to be eligible for prefetch. Entries with shorter upstream TTLs
+	// (e.g. some CDNs at 1-5s) are skipped to avoid thrashing the upstream.
+	// Default 10 seconds.
+	CachePrefetchMinTTL *int `mapstructure:"cache_prefetch_min_ttl" toml:"cache_prefetch_min_ttl,omitempty" validate:"omitempty,gte=0"`
 	MaxConcurrentRequests   *int           `mapstructure:"max_concurrent_requests" toml:"max_concurrent_requests,omitempty" validate:"omitempty,gte=0"`
 	DHCPLeaseFile           string         `mapstructure:"dhcp_lease_file_path" toml:"dhcp_lease_file_path" validate:"omitempty,file"`
 	DHCPLeaseFileFormat     string         `mapstructure:"dhcp_lease_file_format" toml:"dhcp_lease_file_format" validate:"required_unless=DHCPLeaseFile '',omitempty,oneof=dnsmasq isc-dhcp kea-dhcp4"`

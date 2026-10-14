@@ -488,7 +488,7 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 
 	// Inverse query should not be cached: https://www.rfc-editor.org/rfc/rfc1035#section-7.4
 	if p.cache != nil && req.msg.Question[0].Qtype != dns.TypePTR {
-		for _, upstream := range upstreams {
+		for n, upstream := range upstreams {
 			cachedValue := p.cache.Get(dnscache.NewKey(req.msg, upstream))
 			if cachedValue == nil {
 				continue
@@ -499,6 +499,24 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 			if cachedValue.Expire.After(now) {
 				ctrld.Log(ctx, mainLog.Load().Debug(), "hit cached response")
 				setCachedAnswerTTL(answer, now, cachedValue.Expire)
+				// Schedule a background refresh if this entry is near expiry
+				// and the upstream is healthy. The foreground has already
+				// returned the cached answer; the refresh runs in its own
+				// goroutine so the client is unaffected. maybePrefetch is
+				// a no-op when prefetch is disabled or the entry is not yet
+				// within the threshold window.
+				//
+				// We use the original TTL stored in the cached Msg (which
+				// setCachedAnswerTTL set to the original upstream TTL at
+				// cache-write time) so the threshold scales with each
+				// entry's actual TTL rather than a fixed absolute value.
+				if n < len(upstreamConfigs) && upstreamConfigs[n] != nil {
+					originalTTL := ttlFromMsg(cachedValue.Msg)
+					p.prefetcher.maybePrefetch(
+						p, req.msg, upstream, upstreamConfigs[n],
+						cachedValue.Expire, originalTTL,
+					)
+				}
 				res.answer = answer
 				res.cached = true
 				return res

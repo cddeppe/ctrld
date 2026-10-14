@@ -130,6 +130,11 @@ func (p *prog) runMetricsServer(ctx context.Context, reloadCh chan struct{}) {
 		statsVersion.WithLabelValues(commit, runtime.Version(), curVersion()).Inc()
 		reg.MustRegister(statsTimeStart)
 		statsTimeStart.Set(float64(time.Now().Unix()))
+		// Cache prefetch counter is exposed unconditionally so it can be
+		// monitored independently of MetricsQueryStats. The counter is a
+		// no-op (just Increments a process-level value) when prefetch is
+		// disabled, so registration is always safe.
+		reg.MustRegister(statsCachePrefetchRefreshes)
 		mainLog.Load().Debug().Msgf("starting metrics server on: %s", addr)
 		if err := ms.start(); err != nil {
 			mainLog.Load().Warn().Err(err).Msg("could not start metrics server")
