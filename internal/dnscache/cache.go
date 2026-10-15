@@ -13,6 +13,12 @@ type Cacher interface {
 	Get(Key) *Value
 	Add(Key, *Value)
 	Purge()
+	// Walk iterates over all cache entries without updating LRU recency.
+	// The callback receives each (key, value) pair; returning false stops
+	// iteration. Walk uses Peek() internally, so it does NOT pollute the
+	// eviction order — entries walked are not marked as recently-used.
+	// Safe for concurrent use; holds only the read lock briefly per entry.
+	Walk(func(Key, *Value) bool)
 }
 
 // Key is the caching key for DNS message.
@@ -49,6 +55,40 @@ func (l *LRUCache) Add(key Key, value *Value) {
 // Purge clears the cache.
 func (l *LRUCache) Purge() {
 	l.cacher.Purge()
+}
+
+// Walk iterates over all cache entries without updating LRU recency.
+// The callback receives each (key, value) pair; returning false stops
+// iteration. Uses Peek() under the hood so eviction order is preserved
+// (i.e. walking the cache does NOT mark entries as recently-used, which
+// would otherwise defeat the LRU policy).
+//
+// Snapshot semantics: the key list is obtained once at the start; entries
+// added or evicted during the walk will not be visited. Values are Peek'd
+// per-key, so a value that's evicted between the key list snapshot and the
+// Peek call will be skipped (Peek returns ok=false).
+//
+// Safe for concurrent use with Get/Add/Purge — those operations take the
+// write lock briefly; Walk takes the read lock per Peek. Worst-case
+// contention is microsecond-level per entry.
+func (l *LRUCache) Walk(fn func(Key, *Value) bool) {
+	if l == nil || l.cacher == nil || fn == nil {
+		return
+	}
+	// Keys() returns a snapshot slice — takes RLock briefly, then releases.
+	// Iterating the snapshot does not hold any lock.
+	keys := l.cacher.Keys()
+	for _, k := range keys {
+		// Peek takes RLock briefly per call. Returns (value, ok) — if ok
+		// is false, the entry was evicted between the snapshot and now.
+		v, ok := l.cacher.Peek(k)
+		if !ok || v == nil {
+			continue
+		}
+		if !fn(k, v) {
+			return
+		}
+	}
 }
 
 // NewLRUCache creates a new LRUCache instance with given size.

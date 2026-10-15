@@ -84,6 +84,21 @@ func (ms *metricsServer) start() error {
 	return nil
 }
 
+	// registerCacheHandler adds the /cache endpoint that dumps the in-memory
+	// DNS cache as JSON. Used by external programs (e.g. bpftune-swap) to
+	// learn IP<->domain mappings that ctrld has resolved recently.
+	// The handler is gated behind metricsQueryStats (same privacy posture
+	// as the per-client query stats endpoint).
+	//
+	// Must be called BEFORE ms.start() so the route is registered before
+	// the server begins listening.
+	func (ms *metricsServer) registerCacheHandler(p *prog) {
+		if p.cache == nil {
+			return // cache disabled, nothing to expose
+		}
+		ms.register("/cache", http.HandlerFunc(p.serveCacheDump))
+	}
+
 // stop shutdowns the metricsServer within 2 seconds timeout.
 func (ms *metricsServer) stop() error {
 	if !ms.started {
@@ -135,6 +150,10 @@ func (p *prog) runMetricsServer(ctx context.Context, reloadCh chan struct{}) {
 		// no-op (just Increments a process-level value) when prefetch is
 		// disabled, so registration is always safe.
 		reg.MustRegister(statsCachePrefetchRefreshes)
+		// Register the /cache endpoint (dumps in-memory DNS cache as JSON
+		// for consumers like bpftune-swap). Gated behind metricsQueryStats
+		// inside the handler itself, so it returns 404 if stats are disabled.
+		ms.registerCacheHandler(p)
 		mainLog.Load().Debug().Msgf("starting metrics server on: %s", addr)
 		if err := ms.start(); err != nil {
 			mainLog.Load().Warn().Err(err).Msg("could not start metrics server")
