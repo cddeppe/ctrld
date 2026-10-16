@@ -55,11 +55,12 @@ type domainGraph struct {
         enabled bool
 
         // Configuration.
-        windowSec     int           // how recent a prior query counts as "co-occurring"
-        minCoOccur    float64       // minimum weight to predict a neighbor
-        topK          int           // max neighbors to predict per query
-        maxGraphSize  int           // hard cap on distinct domains tracked
-        decayFactor   float64       // multiply all edges by this on each GC pass
+        windowSec      int           // how recent a prior query counts as "co-occurring"
+        minCoOccur     float64       // minimum weight to predict a neighbor
+        topK           int           // max neighbors to predict per query
+        maxGraphSize   int           // hard cap on distinct domains tracked
+        decayFactor    float64       // multiply all edges by this on each GC pass
+        historyWeight  float64       // multiplier for edges learned from API history replay (default 3.0)
         gcInterval    time.Duration // how often GC runs
 
         // State. All access via mu.
@@ -114,8 +115,9 @@ func newDomainGraph(p *prog) *domainGraph {
                 minCoOccur:   5,
                 topK:         5,
                 maxGraphSize: 10000,
-                decayFactor:  0.95,
-                gcInterval:   5 * time.Minute,
+                decayFactor:   0.95,
+                historyWeight: 3.0,
+                gcInterval:    5 * time.Minute,
         }
         if !p.cfg.Service.CacheEnable || p.cache == nil {
                 return dg
@@ -136,6 +138,9 @@ func newDomainGraph(p *prog) *domainGraph {
         }
         if v := p.cfg.Service.DomainPrefetchMaxGraphSize; v != nil && *v > 0 {
                 dg.maxGraphSize = *v
+        }
+        if v := p.cfg.Service.DomainPrefetchHistoryWeight; v != nil && *v > 0 {
+                dg.historyWeight = *v
         }
         // Explicit disable via minCoOccurrence=0 OR topK=0.
         if v := p.cfg.Service.DomainPrefetchMinCoOccurrence; v != nil && *v == 0 {
@@ -158,14 +163,28 @@ func (dg *domainGraph) start(ctx context.Context) {
         })
 }
 
-// recordQuery records that clientIP queried domain at the current time.
+// recordQuery records a LIVE client query (weight=1.0) — used by the
+// proxy() hook when a foreground resolve succeeds.
+func (dg *domainGraph) recordQuery(clientIP, domain string) {
+        dg.recordQueryWithWeight(clientIP, domain, 1.0)
+}
+
+// recordQueryWithWeight records that clientIP queried domain at the current
+// time, incrementing co-occurrence edge weights by the given multiplier.
+// Used by:
+//   - Live queries from proxy() (weight=1.0, via recordQuery wrapper)
+//   - API history replay (weight=historyWeight, default 3.0 — historical
+//     patterns are based on ~10K queries worth of data, so they should
+//     outweigh a few hours of live observation)
+//
 // For each prior query from the same client within windowSec, increments
-// the bidirectional co-occurrence edge between domain and the prior domain.
+// the bidirectional co-occurrence edge between domain and the prior domain
+// by `weight`.
 //
 // O(N) where N = recent queries from this client (bounded by windowSec,
 // typically 1-20 entries). Cheap.
-func (dg *domainGraph) recordQuery(clientIP, domain string) {
-        if !dg.enabled || clientIP == "" || domain == "" {
+func (dg *domainGraph) recordQueryWithWeight(clientIP, domain string, weight float64) {
+        if !dg.enabled || clientIP == "" || domain == "" || weight <= 0 {
                 return
         }
         now := time.Now()
@@ -190,10 +209,11 @@ func (dg *domainGraph) recordQuery(clientIP, domain string) {
 
         // Increment co-occurrence with each UNIQUE prior domain in the window
         // (skip self). Dedupe so if the client queried b.com 5 times in the
-        // window, the a→b edge only increments by 1 when a.com is queried —
-        // this makes the weight track "number of times this pair was seen
-        // together" rather than "combinatorial count of all (prior, current)
-        // pairs", which would grow O(N^2) and saturate the threshold quickly.
+        // window, the a→b edge only increments by `weight` when a.com is
+        // queried — this makes the weight track "number of times this pair
+        // was seen together" rather than "combinatorial count of all (prior,
+        // current) pairs", which would grow O(N^2) and saturate the threshold
+        // quickly.
         seen := make(map[string]bool, len(recent))
         for _, q := range recent {
                 if q.domain == domain {
@@ -203,8 +223,8 @@ func (dg *domainGraph) recordQuery(clientIP, domain string) {
                         continue
                 }
                 seen[q.domain] = true
-                dg.addEdgeLocked(q.domain, domain, 1)
-                dg.addEdgeLocked(domain, q.domain, 1)
+                dg.addEdgeLocked(q.domain, domain, weight)
+                dg.addEdgeLocked(domain, q.domain, weight)
         }
 
         // Append this query.
@@ -306,6 +326,98 @@ func (dg *domainGraph) predictNeighbors(domain string) []string {
         }
         dg.predictions.Add(int64(len(out)))
         return out
+}
+
+// logTopTriggers walks the graph and logs the top-N "trigger" domains —
+// domains that have multiple qualifying neighbors (weight >= minCoOccur).
+// These are the high-confidence patterns the graph has learned, e.g.:
+//
+//      domain-graph: trigger netflix.com -> [nflximg.com, nflxext.com, ...]
+//      domain-graph: trigger youtube.com -> [googlevideo.com, i.ytimg.com, ...]
+//
+// Pure observability — no behavior change. Called after API history replay
+// so you can see what patterns were learned from your historical traffic.
+//
+// Sort order: by total weight of qualifying edges (descending). Ties broken
+// by domain name alphabetically for deterministic output.
+func (dg *domainGraph) logTopTriggers() {
+        if !dg.enabled {
+                return
+        }
+
+        dg.mu.RLock()
+        defer dg.mu.RUnlock()
+
+        type trigger struct {
+                domain     string
+                neighbors  []string
+                totalWeight float64
+        }
+
+        triggers := make([]trigger, 0)
+        for domain, neighbors := range dg.coOccur {
+                qualifying := make([]string, 0, len(neighbors))
+                totalW := 0.0
+                for n, w := range neighbors {
+                        if w >= dg.minCoOccur {
+                                qualifying = append(qualifying, n)
+                                totalW += w
+                        }
+                }
+                // A "trigger" has at least 2 qualifying neighbors — i.e. it's a
+                // domain that, when queried, is followed by a meaningful set of
+                // other domains. Single-neighbor entries are common (every domain
+                // has at least one co-occurrence) but not interesting to log.
+                if len(qualifying) >= 2 {
+                        triggers = append(triggers, trigger{
+                                domain:      domain,
+                                neighbors:   qualifying,
+                                totalWeight: totalW,
+                        })
+                }
+        }
+
+        // Sort by total weight desc; ties by domain name asc.
+        for i := 1; i < len(triggers); i++ {
+                j := i
+                for j > 0 {
+                        a, b := triggers[j-1], triggers[j]
+                        if a.totalWeight < b.totalWeight ||
+                                (a.totalWeight == b.totalWeight && a.domain > b.domain) {
+                                triggers[j-1], triggers[j] = triggers[j], triggers[j-1]
+                                j--
+                        } else {
+                                break
+                        }
+                }
+        }
+
+        // Log top 10 (or fewer if we don't have that many).
+        count := len(triggers)
+        if count > 10 {
+                count = 10
+        }
+        if count == 0 {
+                mainLog.Load().Info().Msg("domain-graph: no trigger domains learned yet (need >= 2 neighbors above threshold)")
+                return
+        }
+        mainLog.Load().Info().Msgf("domain-graph: %d trigger domains learned (showing top %d):", len(triggers), count)
+        for i := 0; i < count; i++ {
+                t := triggers[i]
+                // Cap the neighbor list display at 8 to keep logs readable.
+                display := t.neighbors
+                if len(display) > 8 {
+                        display = display[:8]
+                }
+                mainLog.Load().Info().Msgf("  trigger %s (total_weight=%.1f) -> %v%s",
+                        t.domain, t.totalWeight, display,
+                        func() string {
+                                if len(t.neighbors) > 8 {
+                                        return " ..."
+                                }
+                                return ""
+                        }())
+        }
 }
 
 // recordPrefetchFailure demotes the edge between domain and neighbor by 0.5x,

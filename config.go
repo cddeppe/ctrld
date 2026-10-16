@@ -261,6 +261,24 @@ type ServiceConfig struct {
 	// Capped by Control-D's API; larger values take longer to fetch but
 	// produce a richer graph snapshot.
 	DomainPrefetchAPIHistoryLimit *int `mapstructure:"domain_prefetch_api_history_limit" toml:"domain_prefetch_api_history_limit,omitempty" validate:"omitempty,gte=0"`
+	// DomainPrefetchAPIToken is an alternative to the CONTROLD_API_TOKEN
+	// env var for the Control-D API bearer token. Read-only token is
+	// sufficient (only GET /queries is called).
+	//
+	// Resolution order: env var CONTROLD_API_TOKEN > env var
+	// CONTROLD_API_TOKEN_READ > this config field. Env vars are preferred
+	// for secrets hygiene (config files are often cached/logged), but
+	// the config field works via Control-D's CustomConfig overlay —
+	// convenient because it auto-propagates to all devices using the
+	// same resolver ID. Trade-off: any dashboard admin can see it.
+	DomainPrefetchAPIToken *string `mapstructure:"domain_prefetch_api_token" toml:"domain_prefetch_api_token,omitempty"`
+	// DomainPrefetchHistoryWeight is the multiplier applied to edge weights
+	// when replaying API history. Default 3.0 — historical patterns are
+	// based on ~10K queries worth of data, so they should outweigh a few
+	// hours of live observation by 3:1. Higher values make historical
+	// patterns dominate longer; lower values (e.g. 1.0) treat history
+	// and live queries equally.
+	DomainPrefetchHistoryWeight *float64 `mapstructure:"domain_prefetch_history_weight" toml:"domain_prefetch_history_weight,omitempty" validate:"omitempty,gt=0"`
 	MaxConcurrentRequests   *int           `mapstructure:"max_concurrent_requests" toml:"max_concurrent_requests,omitempty" validate:"omitempty,gte=0"`
 	DHCPLeaseFile           string         `mapstructure:"dhcp_lease_file_path" toml:"dhcp_lease_file_path" validate:"omitempty,file"`
 	DHCPLeaseFileFormat     string         `mapstructure:"dhcp_lease_file_format" toml:"dhcp_lease_file_format" validate:"required_unless=DHCPLeaseFile '',omitempty,oneof=dnsmasq isc-dhcp kea-dhcp4"`

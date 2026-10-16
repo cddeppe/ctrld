@@ -118,12 +118,18 @@ func newAPIHistoryConfig(p *prog) apiHistoryConfig {
         }
         cfg.enabled = true
 
-        // Token from env var (preferred over config file — keeps the secret
-        // out of any cached/serialized config dumps).
+        // Token resolution order:
+        //   1. Env var CONTROLD_API_TOKEN (preferred — keeps secret out of config)
+        //   2. Env var CONTROLD_API_TOKEN_READ (mcp-controld naming convention)
+        //   3. Config field DomainPrefetchAPIToken (works via Control-D CustomConfig
+        //      overlay — convenient since it auto-propagates to all devices using
+        //      the same resolver ID; just remember any dashboard admin can see it)
         cfg.token = os.Getenv("CONTROLD_API_TOKEN")
         if cfg.token == "" {
-                // Some users may have used the mcp-controld naming convention.
                 cfg.token = os.Getenv("CONTROLD_API_TOKEN_READ")
+        }
+        if cfg.token == "" && p.cfg.Service.DomainPrefetchAPIToken != nil {
+                cfg.token = *p.cfg.Service.DomainPrefetchAPIToken
         }
         if cfg.token == "" {
                 // Disabled — no token, can't call the API.
@@ -294,12 +300,21 @@ func (dg *domainGraph) fetchAndReplayHistory(ctx context.Context, p *prog) {
                         skipped++
                         continue
                 }
-                dg.recordQuery(q.parseClientIP(), q.Domain)
+                // Replay with the history-weight multiplier — historical patterns
+                // are based on ~10K queries worth of data, so they should
+                // outweigh a few hours of live observation. Weight defaults to
+                // 3.0; configurable via domain_prefetch_history_weight.
+                dg.recordQueryWithWeight(q.parseClientIP(), q.Domain, dg.historyWeight)
                 replayed++
         }
 
-        mainLog.Load().Info().Msgf("domain-graph: replayed %d queries (skipped %d non-A/AAAA/empty), graph now has %d domains",
-                replayed, skipped, dg.domainCount())
+        mainLog.Load().Info().Msgf("domain-graph: replayed %d queries (skipped %d non-A/AAAA/empty) with weight=%.1fx, graph now has %d domains",
+                replayed, skipped, dg.historyWeight, dg.domainCount())
+
+        // Log the top trigger domains so the user can SEE what patterns were
+        // learned from history (e.g. "netflix.com -> [nflximg.com, ...]").
+        // Pure observability — no behavior change.
+        dg.logTopTriggers()
 
         // Count for observability.
         apiHistoryReplays.Add(int64(replayed))
