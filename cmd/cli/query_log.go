@@ -152,12 +152,11 @@ func (ql *queryLogger) appendQuery(clientIP, domain string, qtype uint16) {
         _ = ql.bw.WriteByte('\n')
         ql.writes.Add(1)
 
-        // Flush every 100 writes or when buffer is near-full. Avoids
-        // calling Flush() on every write (syscalls are expensive under
-        // high QPS).
-        if ql.writes.Load()%100 == 0 {
-                _ = ql.bw.Flush()
-        }
+        // Flush every write. This ensures data reaches disk immediately,
+        // so it survives crashes/restarts. The performance cost is ~1
+        // syscall per query — negligible for typical DNS workloads (10-100
+        // QPS = 10-100 syscalls/sec = <0.1% CPU).
+        _ = ql.bw.Flush()
 }
 
 // flush writes any buffered data to the underlying file. Safe to call
