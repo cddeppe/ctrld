@@ -16,10 +16,11 @@ import (
 // from Control-D's API to pre-seed the domain graph. Built once at startup
 // from ServiceConfig + env vars.
 type apiHistoryConfig struct {
-        enabled bool
-        token   string // Bearer token, read from CONTROLD_API_TOKEN env var
-        deviceID string // Control-D resolver/device ID, from the --cd flag value
-        limit   int    // how many queries to fetch
+        enabled       bool
+        token         string // Bearer token, read from CONTROLD_API_TOKEN env var
+        deviceID      string // Control-D resolver/device ID, from the --cd flag value
+        limit         int    // how many queries to fetch
+        disableReason string // human-readable explanation when enabled=false
 }
 
 // apiHistoryResponse is the (defensive) shape of the JSON response from
@@ -111,9 +112,11 @@ func newAPIHistoryConfig(p *prog) apiHistoryConfig {
                 limit: 10000,
         }
         if p.domainGraph == nil || !p.domainGraph.enabled {
+                cfg.disableReason = "domain graph is disabled (cache_enable is false or cache failed to initialize)"
                 return cfg
         }
         if v := p.cfg.Service.DomainPrefetchAPIHistoryFetch; v == nil || !*v {
+                cfg.disableReason = "domain_prefetch_api_history_fetch is not set to true (set it in CustomConfig to enable)"
                 return cfg
         }
         cfg.enabled = true
@@ -134,20 +137,33 @@ func newAPIHistoryConfig(p *prog) apiHistoryConfig {
         if cfg.token == "" {
                 // Disabled — no token, can't call the API.
                 cfg.enabled = false
+                cfg.disableReason = "no API token (set CONTROLD_API_TOKEN env var OR domain_prefetch_api_token in CustomConfig — read-only token is sufficient)"
                 return cfg
         }
 
-        // Device ID: prefer explicit config, fall back to --cd flag value.
-        // The --cd flag is the resolver UID, which is the same as device_id
-        // in the API's terms.
+        // Device ID resolution order:
+        //   1. Explicit config field DomainPrefetchAPIHistoryDeviceID
+        //   2. The --cd flag value (cdUID package-level var, set by cobra at
+        //      CLI parse time — always available, unlike p.rc which is set
+        //      async by the API config fetch)
+        //   3. p.rc.UID (the API-fetched ResolverConfig — may be nil at
+        //      startup before the API call completes; used as last resort)
         if v := p.cfg.Service.DomainPrefetchAPIHistoryDeviceID; v != nil && *v != "" {
                 cfg.deviceID = *v
+        } else if cdUID != "" {
+                // --cd flag value, set at CLI parse time. This is the same value
+                // that p.rc.UID would have (since the API call uses --cd), but
+                // available immediately rather than after the async fetch.
+                cfg.deviceID = cdUID
         } else if p.rc != nil && p.rc.UID != "" {
                 cfg.deviceID = p.rc.UID
         }
         if cfg.deviceID == "" {
-                // Can't fetch without a device ID — disable with a warning.
+                // Can't fetch without a device ID — disable. The caller logs the
+                // specific reason at INFO level (not here, to keep this function
+                // side-effect-free for testing).
                 cfg.enabled = false
+                cfg.disableReason = "no device ID (set domain_prefetch_api_history_device_id explicitly, OR start ctrld with --cd <resolver_id>)"
                 return cfg
         }
 
@@ -181,8 +197,12 @@ func newAPIHistoryConfig(p *prog) apiHistoryConfig {
 func (dg *domainGraph) fetchAndReplayHistory(ctx context.Context, p *prog) {
         cfg := newAPIHistoryConfig(p)
         if !cfg.enabled {
+                // Log at INFO level (not DEBUG) so the user can always see why
+                // the feature disabled itself — without having to enable debug
+                // logging. The disableReason field is set by newAPIHistoryConfig
+                // with a specific, actionable message for each case.
                 if p.domainGraph.enabled {
-                        mainLog.Load().Debug().Msg("domain-graph: API history fetch disabled (no token, no device ID, or feature off)")
+                        mainLog.Load().Info().Msg("domain-graph: API history fetch disabled — " + cfg.disableReason)
                 }
                 return
         }
