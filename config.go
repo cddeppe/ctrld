@@ -220,6 +220,25 @@ type ServiceConfig struct {
 	CacheTTLOverride        int            `mapstructure:"cache_ttl_override" toml:"cache_ttl_override,omitempty"`
 	CacheServeStale         bool           `mapstructure:"cache_serve_stale" toml:"cache_serve_stale,omitempty"`
 	CacheFlushDomains       []string       `mapstructure:"cache_flush_domains" toml:"cache_flush_domains" validate:"max=256"`
+	// DomainPrefetchMinCoOccurrence is the minimum co-occurrence weight
+	// for the domain graph to speculate a prefetch. Default 5 — domains
+	// must have been queried together at least 5 times within windowSec
+	// before prefetching is triggered. Set to 0 to disable domain-graph
+	// prefetch entirely (the graph still records queries for inspection
+	// via logs, but doesn't speculate).
+	DomainPrefetchMinCoOccurrence *int `mapstructure:"domain_prefetch_min_co_occurrence" toml:"domain_prefetch_min_co_occurrence,omitempty" validate:"omitempty,gte=0"`
+	// DomainPrefetchTopK is the maximum number of neighbors to speculatively
+	// prefetch per query. Default 5. Bounds upstream query volume.
+	DomainPrefetchTopK *int `mapstructure:"domain_prefetch_top_k" toml:"domain_prefetch_top_k,omitempty" validate:"omitempty,gte=0"`
+	// DomainPrefetchWindowSec is the time window (in seconds) for two queries
+	// from the same client to count as "co-occurring". Default 60. Shorter
+	// windows learn tighter patterns but miss slower co-occurrences; longer
+	// windows are noisier.
+	DomainPrefetchWindowSec *int `mapstructure:"domain_prefetch_window_sec" toml:"domain_prefetch_window_sec,omitempty" validate:"omitempty,gte=0"`
+	// DomainPrefetchMaxGraphSize is the hard cap on distinct domains tracked
+	// in the co-occurrence graph. Default 10000 (~5MB memory). When the cap
+	// is hit, the least-recently-seen domain is evicted with all its edges.
+	DomainPrefetchMaxGraphSize *int `mapstructure:"domain_prefetch_max_graph_size" toml:"domain_prefetch_max_graph_size,omitempty" validate:"omitempty,gte=0"`
 	MaxConcurrentRequests   *int           `mapstructure:"max_concurrent_requests" toml:"max_concurrent_requests,omitempty" validate:"omitempty,gte=0"`
 	DHCPLeaseFile           string         `mapstructure:"dhcp_lease_file_path" toml:"dhcp_lease_file_path" validate:"omitempty,file"`
 	DHCPLeaseFileFormat     string         `mapstructure:"dhcp_lease_file_format" toml:"dhcp_lease_file_format" validate:"required_unless=DHCPLeaseFile '',omitempty,oneof=dnsmasq isc-dhcp kea-dhcp4"`

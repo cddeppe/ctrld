@@ -49,6 +49,16 @@ var statsClientQueriesCount = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Help: "Total number queries of a client.",
 }, []string{metricsLabelClientSourceIP, metricsLabelClientMac, metricsLabelClientHostname})
 
+// statsDomainPrefetchPredictions counts the number of speculative prefetches
+// the domain-graph predictor has scheduled. Incremented per neighbor
+// prefetched (so a single query that triggers 5 neighbor prefetches
+// increments by 5). Exposed unconditionally so it can be monitored
+// independently of MetricsQueryStats.
+var statsDomainPrefetchPredictions = prometheus.NewCounter(prometheus.CounterOpts{
+	Name: "ctrld_domain_prefetch_predictions_total",
+	Help: "Total number of speculative prefetches scheduled by the domain-graph predictor.",
+})
+
 // WithLabelValuesInc increases prometheus counter by 1 if query stats is enabled.
 func (p *prog) WithLabelValuesInc(c *prometheus.CounterVec, lvs ...string) {
 	if p.metricsQueryStats.Load() {

@@ -116,6 +116,7 @@ type prog struct {
 	appCallback               *AppCallback
 	cache                     dnscache.Cacher
 	cacheFlushDomainsMap      map[string]struct{}
+	domainGraph               *domainGraph
 	sema                      semaphore
 	ciTable                   *clientinfo.Table
 	um                        *upstreamMonitor
@@ -502,6 +503,13 @@ func (p *prog) run(reload bool, reloadCh chan struct{}) {
 
 	p.um = newUpstreamMonitor(p.cfg)
 
+	// Initialize the domain co-occurrence graph for predictive prefetch.
+	// Returns a disabled stub when caching is off, so p.domainGraph is
+	// always non-nil and dns_proxy.go can call maybePrefetchNeighbors
+	// unconditionally. The GC goroutine is started later in run()
+	// after the ctx is available.
+	p.domainGraph = newDomainGraph(p)
+
 	if !reload {
 		p.sema = &chanSemaphore{ready: make(chan struct{}, defaultSemaphoreCap)}
 		if mcr := p.cfg.Service.MaxConcurrentRequests; mcr != nil {
@@ -519,6 +527,11 @@ func (p *prog) run(reload bool, reloadCh chan struct{}) {
 	// context for managing spawn goroutines.
 	ctx, cancelFunc := context.WithCancel(context.Background())
 	defer cancelFunc()
+
+	// Start the domain-graph GC goroutine. Bound to ctx so the graph
+	// stops cleanly on reload/stop. The goroutine is a no-op when domain
+	// prefetch is disabled.
+	p.domainGraph.start(ctx)
 
 	// Newer versions of android and iOS denies permission which breaks connectivity.
 	if !isMobile() && !reload {

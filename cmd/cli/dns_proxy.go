@@ -603,6 +603,24 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 			setCachedAnswerTTL(answer, now, expired)
 			p.cache.Add(dnscache.NewKey(req.msg, upstreams[n]), dnscache.NewValue(answer, expired))
 			ctrld.Log(ctx, mainLog.Load().Debug(), "add cached response")
+			// Hook the domain-graph predictor: records the query for
+			// learning, then speculatively prefetches the predicted
+			// neighbors (if any) in the background. maybePrefetchNeighbors
+			// is a no-op when domain prefetch is disabled, or when the
+			// current ctx is itself a prefetch call (prevents runaway
+			// recursion).
+			if p.domainGraph != nil {
+				clientIP := ""
+				if req.ci != nil {
+					clientIP = req.ci.IP
+				}
+				if scheduled := p.domainGraph.maybePrefetchNeighbors(
+					ctx, p, clientIP, req.msg.Question[0].Name,
+					req.msg.Question[0].Qtype, upstreams[n], upstreamConfig,
+				); scheduled > 0 {
+					statsDomainPrefetchPredictions.Add(float64(scheduled))
+				}
+			}
 		}
 		hostname := ""
 		if req.ci != nil {
