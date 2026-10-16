@@ -338,6 +338,15 @@ func (dg *domainGraph) predictNeighbors(domain string) []string {
 // Pure observability — no behavior change. Called after API history replay
 // so you can see what patterns were learned from your historical traffic.
 //
+// domainCount returns the number of distinct domains currently in the
+// co-occurrence graph (i.e., domains that have at least one edge).
+// Used for logging the graph state after replay. Read-locked.
+func (dg *domainGraph) domainCount() int {
+        dg.mu.RLock()
+        defer dg.mu.RUnlock()
+        return len(dg.coOccur)
+}
+
 // Sort order: by total weight of qualifying edges (descending). Ties broken
 // by domain name alphabetically for deterministic output.
 func (dg *domainGraph) logTopTriggers() {

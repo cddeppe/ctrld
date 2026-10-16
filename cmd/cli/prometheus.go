@@ -59,14 +59,13 @@ var statsDomainPrefetchPredictions = prometheus.NewCounter(prometheus.CounterOpt
 	Help: "Total number of speculative prefetches scheduled by the domain-graph predictor.",
 })
 
-// statsAPIHistoryReplays counts the total number of historical DNS queries
-// replayed through the domain graph via the Control-D API. Each replay = one
-// historical query pre-seeding the co-occurrence graph. Exposed unconditionally
-// when the metrics server is enabled, so you can verify the history fetch
-// actually happened.
-var statsAPIHistoryReplays = prometheus.NewCounter(prometheus.CounterOpts{
-	Name: "ctrld_api_history_replays_total",
-	Help: "Total number of historical DNS queries replayed through the domain graph via the Control-D API.",
+// statsLocalHistoryReplays counts the total number of queries replayed from
+// the LOCAL query log file into the domain graph on startup. Each replay =
+// one historical query pre-seeding the co-occurrence graph. Exposed
+// unconditionally so you can verify the local-log replay actually happened.
+var statsLocalHistoryReplays = prometheus.NewCounter(prometheus.CounterOpts{
+	Name: "ctrld_local_history_replays_total",
+	Help: "Total number of queries replayed from the local query log into the domain graph on startup.",
 })
 
 // WithLabelValuesInc increases prometheus counter by 1 if query stats is enabled.

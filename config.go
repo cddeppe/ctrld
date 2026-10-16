@@ -239,46 +239,31 @@ type ServiceConfig struct {
 	// in the co-occurrence graph. Default 10000 (~5MB memory). When the cap
 	// is hit, the least-recently-seen domain is evicted with all its edges.
 	DomainPrefetchMaxGraphSize *int `mapstructure:"domain_prefetch_max_graph_size" toml:"domain_prefetch_max_graph_size,omitempty" validate:"omitempty,gte=0"`
-	// DomainPrefetchAPIHistoryFetch enables fetching the device's recent DNS
-	// query history from api.controld.com on startup, then replaying those
-	// queries through the domain graph to pre-seed co-occurrence patterns.
-	// Solves the cold-start problem: the graph starts with real patterns
-	// from your last ~24h of traffic instead of learning from scratch.
-	//
-	// Requires:
-	//   1. Full Analytics enabled on the device in the Control-D dashboard
-	//      (otherwise the /queries endpoint returns no data)
-	//   2. CONTROLD_API_TOKEN env var set (read-only token is sufficient)
-	//   3. Either domain_prefetch_api_history_device_id explicitly set, OR
-	//      ctrld started with --cd <resolver_id> (which is auto-detected)
-	DomainPrefetchAPIHistoryFetch *bool `mapstructure:"domain_prefetch_api_history_fetch" toml:"domain_prefetch_api_history_fetch,omitempty"`
-	// DomainPrefetchAPIHistoryDeviceID is the Control-D resolver/device ID
-	// to fetch query history for. If not set, ctrld auto-detects it from the
-	// --cd flag value (which is the resolver UID).
-	DomainPrefetchAPIHistoryDeviceID *string `mapstructure:"domain_prefetch_api_history_device_id" toml:"domain_prefetch_api_history_device_id,omitempty"`
-	// DomainPrefetchAPIHistoryLimit is how many recent queries to fetch and
-	// replay. Default 10000 (about 24h of typical home-network traffic).
-	// Capped by Control-D's API; larger values take longer to fetch but
-	// produce a richer graph snapshot.
-	DomainPrefetchAPIHistoryLimit *int `mapstructure:"domain_prefetch_api_history_limit" toml:"domain_prefetch_api_history_limit,omitempty" validate:"omitempty,gte=0"`
-	// DomainPrefetchAPIToken is an alternative to the CONTROLD_API_TOKEN
-	// env var for the Control-D API bearer token. Read-only token is
-	// sufficient (only GET /queries is called).
-	//
-	// Resolution order: env var CONTROLD_API_TOKEN > env var
-	// CONTROLD_API_TOKEN_READ > this config field. Env vars are preferred
-	// for secrets hygiene (config files are often cached/logged), but
-	// the config field works via Control-D's CustomConfig overlay —
-	// convenient because it auto-propagates to all devices using the
-	// same resolver ID. Trade-off: any dashboard admin can see it.
-	DomainPrefetchAPIToken *string `mapstructure:"domain_prefetch_api_token" toml:"domain_prefetch_api_token,omitempty"`
 	// DomainPrefetchHistoryWeight is the multiplier applied to edge weights
-	// when replaying API history. Default 3.0 — historical patterns are
-	// based on ~10K queries worth of data, so they should outweigh a few
-	// hours of live observation by 3:1. Higher values make historical
-	// patterns dominate longer; lower values (e.g. 1.0) treat history
-	// and live queries equally.
+	// when replaying local query history on startup. Default 3.0 —
+	// historical patterns are based on ~10K queries worth of data, so they
+	// should outweigh a few hours of live observation by 3:1. Higher values
+	// make historical patterns dominate longer; lower values (e.g. 1.0)
+	// treat history and live queries equally.
 	DomainPrefetchHistoryWeight *float64 `mapstructure:"domain_prefetch_history_weight" toml:"domain_prefetch_history_weight,omitempty" validate:"omitempty,gt=0"`
+	// DomainPrefetchLocalHistoryEnabled controls whether ctrld maintains a
+	// local log of DNS queries it processes, then replays that log on
+	// startup to pre-seed the domain graph. Default true (when domain
+	// prefetch is enabled) — this is the SELF-CONTAINED mechanism that
+	// works for everyone, no external API dependency. Set to false to
+	// disable (the graph will start cold on every restart, learning only
+	// from live queries).
+	DomainPrefetchLocalHistoryEnabled *bool `mapstructure:"domain_prefetch_local_history_enabled" toml:"domain_prefetch_local_history_enabled,omitempty"`
+	// DomainPrefetchLocalHistoryPath is the file path for the local query
+	// log. Default /var/lib/ctrld/query-history.jsonl. ctrld creates the
+	// parent directory if needed. JSON-lines format, one query per line:
+	//   {"ts":"2026-10-16T13:54:05.217Z","client_ip":"10.0.0.1","domain":"google.com","qtype":"A"}
+	DomainPrefetchLocalHistoryPath *string `mapstructure:"domain_prefetch_local_history_path" toml:"domain_prefetch_local_history_path,omitempty"`
+	// DomainPrefetchLocalHistoryMaxSizeMB is the hard cap on the local query
+	// log file size. Default 10 (10MB ≈ 100K queries ≈ 24h of typical home
+	// traffic). When the file exceeds this size, ctrld rewrites it on next
+	// startup keeping only the most recent entries that fit.
+	DomainPrefetchLocalHistoryMaxSizeMB *int `mapstructure:"domain_prefetch_local_history_max_size_mb" toml:"domain_prefetch_local_history_max_size_mb,omitempty" validate:"omitempty,gt=0"`
 	MaxConcurrentRequests   *int           `mapstructure:"max_concurrent_requests" toml:"max_concurrent_requests,omitempty" validate:"omitempty,gte=0"`
 	DHCPLeaseFile           string         `mapstructure:"dhcp_lease_file_path" toml:"dhcp_lease_file_path" validate:"omitempty,file"`
 	DHCPLeaseFileFormat     string         `mapstructure:"dhcp_lease_file_format" toml:"dhcp_lease_file_format" validate:"required_unless=DHCPLeaseFile '',omitempty,oneof=dnsmasq isc-dhcp kea-dhcp4"`

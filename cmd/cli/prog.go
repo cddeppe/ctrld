@@ -117,6 +117,7 @@ type prog struct {
 	cache                     dnscache.Cacher
 	cacheFlushDomainsMap      map[string]struct{}
 	domainGraph               *domainGraph
+	queryLog                  *queryLogger
 	sema                      semaphore
 	ciTable                   *clientinfo.Table
 	um                        *upstreamMonitor
@@ -509,6 +510,10 @@ func (p *prog) run(reload bool, reloadCh chan struct{}) {
 	// unconditionally. The GC goroutine is started later in run()
 	// after the ctx is available.
 	p.domainGraph = newDomainGraph(p)
+	p.queryLog = newQueryLogger(p)
+	if err := p.queryLog.start(); err != nil {
+		mainLog.Load().Warn().Err(err).Msg("domain-graph: failed to open local query log; cold-start on every restart")
+	}
 
 	if !reload {
 		p.sema = &chanSemaphore{ready: make(chan struct{}, defaultSemaphoreCap)}
@@ -533,12 +538,16 @@ func (p *prog) run(reload bool, reloadCh chan struct{}) {
 	// prefetch is disabled.
 	p.domainGraph.start(ctx)
 
-	// Kick off the API history fetcher in the background. Fetches the
-	// device's recent DNS query history from api.controld.com and replays
-	// it through the graph to pre-seed co-occurrence patterns. No-op when
-	// disabled (default) or when no API token is set. Doesn't block ctrld
-	// startup — the graph fills in within seconds of the fetch completing.
-	p.domainGraph.startAPIHistoryFetcher(ctx, p)
+	// Replay the local query history log into the domain graph. This is
+	// the SELF-CONTAINED cold-start solution: ctrld maintains its own log
+	// of queries it has processed, persists across restarts, and replays
+	// on startup with the configured weight multiplier (default 3.0x).
+	// Works for everyone — no external API dependency. If the log file
+	// doesn't exist yet (first run), this is a no-op and the graph starts
+	// cold, learning from live queries.
+	if p.queryLog != nil {
+		p.queryLog.replayInto(p.domainGraph, p)
+	}
 
 	// Newer versions of android and iOS denies permission which breaks connectivity.
 	if !isMobile() && !reload {

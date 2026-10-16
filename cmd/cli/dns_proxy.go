@@ -609,17 +609,24 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 			// is a no-op when domain prefetch is disabled, or when the
 			// current ctx is itself a prefetch call (prevents runaway
 			// recursion).
+			// Resolve client IP once for both hooks (domain-graph
+			// predictor + local query log). Empty if no client info.
+			clientIP := ""
+			if req.ci != nil {
+				clientIP = req.ci.IP
+			}
 			if p.domainGraph != nil {
-				clientIP := ""
-				if req.ci != nil {
-					clientIP = req.ci.IP
-				}
 				if scheduled := p.domainGraph.maybePrefetchNeighbors(
 					ctx, p, clientIP, req.msg.Question[0].Name,
 					req.msg.Question[0].Qtype, upstreams[n], upstreamConfig,
 				); scheduled > 0 {
 					statsDomainPrefetchPredictions.Add(float64(scheduled))
 				}
+			}
+			// Append this query to the local log file for replay on next restart.
+			// Best-effort — failures don't break DNS resolution.
+			if p.queryLog != nil {
+				p.queryLog.appendQuery(clientIP, req.msg.Question[0].Name, req.msg.Question[0].Qtype)
 			}
 		}
 		hostname := ""
