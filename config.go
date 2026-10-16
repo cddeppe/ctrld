@@ -239,6 +239,28 @@ type ServiceConfig struct {
 	// in the co-occurrence graph. Default 10000 (~5MB memory). When the cap
 	// is hit, the least-recently-seen domain is evicted with all its edges.
 	DomainPrefetchMaxGraphSize *int `mapstructure:"domain_prefetch_max_graph_size" toml:"domain_prefetch_max_graph_size,omitempty" validate:"omitempty,gte=0"`
+	// DomainPrefetchAPIHistoryFetch enables fetching the device's recent DNS
+	// query history from api.controld.com on startup, then replaying those
+	// queries through the domain graph to pre-seed co-occurrence patterns.
+	// Solves the cold-start problem: the graph starts with real patterns
+	// from your last ~24h of traffic instead of learning from scratch.
+	//
+	// Requires:
+	//   1. Full Analytics enabled on the device in the Control-D dashboard
+	//      (otherwise the /queries endpoint returns no data)
+	//   2. CONTROLD_API_TOKEN env var set (read-only token is sufficient)
+	//   3. Either domain_prefetch_api_history_device_id explicitly set, OR
+	//      ctrld started with --cd <resolver_id> (which is auto-detected)
+	DomainPrefetchAPIHistoryFetch *bool `mapstructure:"domain_prefetch_api_history_fetch" toml:"domain_prefetch_api_history_fetch,omitempty"`
+	// DomainPrefetchAPIHistoryDeviceID is the Control-D resolver/device ID
+	// to fetch query history for. If not set, ctrld auto-detects it from the
+	// --cd flag value (which is the resolver UID).
+	DomainPrefetchAPIHistoryDeviceID *string `mapstructure:"domain_prefetch_api_history_device_id" toml:"domain_prefetch_api_history_device_id,omitempty"`
+	// DomainPrefetchAPIHistoryLimit is how many recent queries to fetch and
+	// replay. Default 10000 (about 24h of typical home-network traffic).
+	// Capped by Control-D's API; larger values take longer to fetch but
+	// produce a richer graph snapshot.
+	DomainPrefetchAPIHistoryLimit *int `mapstructure:"domain_prefetch_api_history_limit" toml:"domain_prefetch_api_history_limit,omitempty" validate:"omitempty,gte=0"`
 	MaxConcurrentRequests   *int           `mapstructure:"max_concurrent_requests" toml:"max_concurrent_requests,omitempty" validate:"omitempty,gte=0"`
 	DHCPLeaseFile           string         `mapstructure:"dhcp_lease_file_path" toml:"dhcp_lease_file_path" validate:"omitempty,file"`
 	DHCPLeaseFileFormat     string         `mapstructure:"dhcp_lease_file_format" toml:"dhcp_lease_file_format" validate:"required_unless=DHCPLeaseFile '',omitempty,oneof=dnsmasq isc-dhcp kea-dhcp4"`

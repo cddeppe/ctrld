@@ -533,6 +533,13 @@ func (p *prog) run(reload bool, reloadCh chan struct{}) {
 	// prefetch is disabled.
 	p.domainGraph.start(ctx)
 
+	// Kick off the API history fetcher in the background. Fetches the
+	// device's recent DNS query history from api.controld.com and replays
+	// it through the graph to pre-seed co-occurrence patterns. No-op when
+	// disabled (default) or when no API token is set. Doesn't block ctrld
+	// startup — the graph fills in within seconds of the fetch completing.
+	p.domainGraph.startAPIHistoryFetcher(ctx, p)
+
 	// Newer versions of android and iOS denies permission which breaks connectivity.
 	if !isMobile() && !reload {
 		wg.Add(1)

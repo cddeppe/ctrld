@@ -132,6 +132,9 @@ func (p *prog) runMetricsServer(ctx context.Context, reloadCh chan struct{}) {
 		statsTimeStart.Set(float64(time.Now().Unix()))
 		// Domain-graph predictor counter.
 		reg.MustRegister(statsDomainPrefetchPredictions)
+		// API history replay counter — number of historical queries
+		// replayed through the graph via the Control-D API.
+		reg.MustRegister(statsAPIHistoryReplays)
 		mainLog.Load().Debug().Msgf("starting metrics server on: %s", addr)
 		if err := ms.start(); err != nil {
 			mainLog.Load().Warn().Err(err).Msg("could not start metrics server")
