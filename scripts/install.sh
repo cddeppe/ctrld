@@ -24,7 +24,7 @@
 set -eu
 
 REPO="cddeppe/ctrld"
-DEFAULT_VERSION="v1.5.8-domain-prefetch.5"
+DEFAULT_VERSION="v1.5.8-domain-prefetch.6"
 
 # --- arg parsing ---
 ARCH=""
