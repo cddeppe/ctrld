@@ -3,6 +3,7 @@ package cli
 import (
         "context"
         "fmt"
+        "math"
         "sync"
         "sync/atomic"
         "time"
@@ -56,17 +57,19 @@ type domainGraph struct {
 
         // Configuration.
         windowSec      int           // how recent a prior query counts as "co-occurring"
-        minCoOccur     float64       // minimum weight to predict a neighbor
+        minCoOccur     float64       // minimum count to predict a neighbor (lifetime, never decays)
         topK           int           // max neighbors to predict per query
         maxGraphSize   int           // hard cap on distinct domains tracked
-        decayFactor    float64       // multiply all edges by this on each GC pass
-        historyWeight  float64       // multiplier for edges learned from API history replay (default 3.0)
-        gcInterval    time.Duration // how often GC runs
+        halfLife       time.Duration // ranking half-life: stale patterns lose rank, never qualification
+        historyWeight  float64       // multiplier for edges learned from log replay (default 3.0)
+        gcInterval     time.Duration // how often GC runs
+        statePath      string        // habit-graph persistence path ("" disables)
+        stateHour      int           // local hour for the daily save (-1 = disabled)
 
         // State. All access via mu.
         mu       sync.RWMutex
-        coOccur  map[string]map[string]float64 // domain -> neighbor -> weight
-        lastSeen map[string]time.Time          // domain -> last recordQuery time, for LRU eviction
+        coOccur  map[string]map[string]float64 // domain -> neighbor -> lifetime count
+        lastSeen map[string]time.Time          // domain -> last recordQuery time, for ranking + LRU
         recent   map[string][]timedQuery        // clientIP -> recent queries (newest last)
 
         // Background goroutine state.
@@ -77,6 +80,11 @@ type domainGraph struct {
         predictions atomic.Int64
         failures     atomic.Int64
         evictions    atomic.Int64
+
+        // Persistence bookkeeping.
+        dirty    bool       // set on any graph mutation; guarded by mu
+        saveMu   sync.Mutex // serializes saves
+        lastSave time.Time  // guarded by saveMu
 
         // The prefetch worker pool. singleflight coalesces concurrent prefetch
         // attempts for the same (domain, qtype, upstream) tuple.
@@ -115,9 +123,10 @@ func newDomainGraph(p *prog) *domainGraph {
                 minCoOccur:   5,
                 topK:         5,
                 maxGraphSize: 10000,
-                decayFactor:   0.95,
-                historyWeight: 3.0,
-                gcInterval:    5 * time.Minute,
+                halfLife:       72 * time.Hour,
+                historyWeight:  3.0,
+                gcInterval:     5 * time.Minute,
+                stateHour:      0,
         }
         if !p.cfg.Service.CacheEnable || p.cache == nil {
                 return dg
@@ -141,6 +150,20 @@ func newDomainGraph(p *prog) *domainGraph {
         }
         if v := p.cfg.Service.DomainPrefetchHistoryWeight; v != nil && *v > 0 {
                 dg.historyWeight = *v
+        }
+        if v := p.cfg.Service.DomainPrefetchMemoryHalfLifeHours; v != nil && *v > 0 {
+                dg.halfLife = time.Duration(*v) * time.Hour
+        }
+        dg.statePath = "/var/lib/ctrld/domain-graph.jsonl"
+        if v := p.cfg.Service.DomainPrefetchStatePath; v != nil {
+                dg.statePath = *v
+        }
+        if v := p.cfg.Service.DomainPrefetchStateSaveHour; v != nil {
+                if *v < 0 {
+                        dg.stateHour = -1
+                } else if *v <= 23 {
+                        dg.stateHour = *v
+                }
         }
         // Explicit disable via minCoOccurrence=0 OR topK=0.
         if v := p.cfg.Service.DomainPrefetchMinCoOccurrence; v != nil && *v == 0 {
@@ -206,8 +229,7 @@ func (dg *domainGraph) recordQueryAt(clientIP, domain string, at time.Time, weig
 
         dg.mu.Lock()
         defer dg.mu.Unlock()
-
-        // Update lastSeen for LRU tracking.
+        dg.dirty = true
         dg.lastSeen[domain] = at
 
         // Trim client's recent list to windowSec (measured from `at`).
@@ -290,8 +312,17 @@ func (dg *domainGraph) enforceCapLocked(now time.Time) {
 }
 
 // predictNeighbors returns up to topK domains that have co-occurred with
-// domain at least minCoOccur times. Sorted by weight descending. Empty
-// result if no qualifying neighbors.
+// domain at least minCoOccur times. Qualification is by LIFETIME count
+// (co-occurrence counts never decay), so a habit used once a week is
+// still predicted immediately when its trigger domain is queried.
+//
+// Ranking uses an effective weight:
+//
+//      rank = count * 2^(-age / halfLife)
+//
+// where age is how long ago the neighbor was last queried. Hot, recent
+// patterns take the top-K slots; equally-stale habit neighbors keep
+// their relative order by count.
 func (dg *domainGraph) predictNeighbors(domain string) []string {
         if !dg.enabled || domain == "" {
                 return nil
@@ -299,34 +330,41 @@ func (dg *domainGraph) predictNeighbors(domain string) []string {
         domain = normalizeDomain(domain)
 
         dg.mu.RLock()
+        defer dg.mu.RUnlock()
         neighbors := dg.coOccur[domain]
         if len(neighbors) == 0 {
-                dg.mu.RUnlock()
                 return nil
         }
-        // Copy qualifying candidates under the read lock.
+        now := time.Now()
         type weighted struct {
                 domain string
-                weight float64
+                rank   float64
         }
         candidates := make([]weighted, 0, len(neighbors))
-        for n, w := range neighbors {
-                if w >= dg.minCoOccur {
-                        candidates = append(candidates, weighted{domain: n, weight: w})
+        for n, count := range neighbors {
+                if count < dg.minCoOccur {
+                        continue
                 }
+                age := 30 * 24 * time.Hour // unknown lastSeen: rank as very stale
+                if seen, ok := dg.lastSeen[n]; ok && !seen.IsZero() {
+                        age = now.Sub(seen)
+                        if age < 0 {
+                                age = 0
+                        }
+                }
+                rank := count * math.Pow(2, -float64(age)/float64(dg.halfLife))
+                candidates = append(candidates, weighted{domain: n, rank: rank})
         }
-        dg.mu.RUnlock()
-
         if len(candidates) == 0 {
                 return nil
         }
-        // Sort by weight descending; ties broken alphabetically for determinism.
-        // Insertion sort — N is small (typically topK=5, max ~50).
+        // Sort by rank descending; ties broken alphabetically. Insertion
+        // sort — N is small (typically topK=5, max ~50).
         for i := 1; i < len(candidates); i++ {
                 j := i
                 for j > 0 {
-                        if candidates[j-1].weight < candidates[j].weight ||
-                                (candidates[j-1].weight == candidates[j].weight && candidates[j-1].domain > candidates[j].domain) {
+                        if candidates[j-1].rank < candidates[j].rank ||
+                                (candidates[j-1].rank == candidates[j].rank && candidates[j-1].domain > candidates[j].domain) {
                                 candidates[j-1], candidates[j] = candidates[j], candidates[j-1]
                                 j--
                         } else {
@@ -334,7 +372,6 @@ func (dg *domainGraph) predictNeighbors(domain string) []string {
                         }
                 }
         }
-
         k := dg.topK
         if k > len(candidates) {
                 k = len(candidates)
@@ -460,6 +497,7 @@ func (dg *domainGraph) recordPrefetchFailure(domain, neighbor string) {
 
         dg.mu.Lock()
         defer dg.mu.Unlock()
+        dg.dirty = true
 
         if neighbors, ok := dg.coOccur[domain]; ok {
                 if w, ok := neighbors[neighbor]; ok {
@@ -486,12 +524,15 @@ func (dg *domainGraph) gcLoop(ctx context.Context) {
                         return
                 case <-ticker.C:
                         dg.gcPass()
+                        dg.maybeSaveStateNightly()
                 }
         }
 }
 
-// gcPass trims expired entries from each client's recent list and decays
-// all edge weights. Calls under a write lock briefly.
+// gcPass trims expired entries from each client's recent list and prunes
+// ghost lastSeen entries. Edge counts are NOT decayed: co-occurrence
+// counts are lifetime "habit memory" and only lose RANKING priority over
+// time (see predictNeighbors). Memory is bounded by the maxGraphSize LRU.
 func (dg *domainGraph) gcPass() {
         if !dg.enabled {
                 return
@@ -518,25 +559,9 @@ func (dg *domainGraph) gcPass() {
                 }
         }
 
-        // Decay all edges. Edges that drop to a tiny weight are pruned.
-        const pruneThreshold = 0.5
-        for domain, neighbors := range dg.coOccur {
-                for n, w := range neighbors {
-                        w *= dg.decayFactor
-                        if w < pruneThreshold {
-                                delete(neighbors, n)
-                        } else {
-                                neighbors[n] = w
-                        }
-                }
-                if len(neighbors) == 0 {
-                        delete(dg.coOccur, domain)
-                }
-        }
-
-        // Prune lastSeen entries for domains that no longer have edges and
-        // haven't been queried within the window. Without this, lastSeen
-        // grows unboundedly (one entry per unique domain ever queried).
+        // Prune lastSeen entries for domains that have no edges and have
+        // not been queried within the window (ghosts; keeps the LRU scan
+        // honest and bounds memory).
         for d, t := range dg.lastSeen {
                 if t.Before(cutoff) {
                         if neighbors, ok := dg.coOccur[d]; !ok || len(neighbors) == 0 {

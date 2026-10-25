@@ -542,6 +542,11 @@ func (p *prog) run(reload bool, reloadCh chan struct{}) {
         // prefetch is disabled.
         p.domainGraph.start(ctx)
 
+        // Restore the persisted habit graph so week-old patterns survive
+        // reboots. Must run BEFORE query-log replay (replay adds recent detail
+        // on top of the restored baseline).
+        p.domainGraph.loadState()
+
         // Replay the local query history log into the domain graph. This is
         // the SELF-CONTAINED cold-start solution: ctrld maintains its own log
         // of queries it has processed, persists across restarts, and replays
@@ -670,6 +675,13 @@ func (p *prog) metricsEnabled() bool {
 }
 
 func (p *prog) Stop(s service.Service) error {
+        // Save the habit graph so a graceful stop/restart loses nothing.
+        if p.domainGraph != nil {
+                p.domainGraph.saveState()
+        }
+        if p.queryLog != nil {
+                _ = p.queryLog.close()
+        }
         p.stopDnsWatchers()
         mainLog.Load().Debug().Msg("dns watchers stopped")
         for _, f := range p.onStopped {

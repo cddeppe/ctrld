@@ -246,6 +246,19 @@ type ServiceConfig struct {
 	// make historical patterns dominate longer; lower values (e.g. 1.0)
 	// treat history and live queries equally.
 	DomainPrefetchHistoryWeight *float64 `mapstructure:"domain_prefetch_history_weight" toml:"domain_prefetch_history_weight,omitempty" validate:"omitempty,gt=0"`
+	// DomainPrefetchMemoryHalfLifeHours controls how fast OLD patterns lose
+	// RANKING priority to newer ones (default 72 = 3 days). Qualification
+	// is unaffected: a pair seen together min_co_occurrence times stays
+	// predictable until evicted, so weekly habits still trigger instantly.
+	DomainPrefetchMemoryHalfLifeHours *int `mapstructure:"domain_prefetch_memory_half_life_hours" toml:"domain_prefetch_memory_half_life_hours,omitempty" validate:"omitempty,gt=0"`
+	// DomainPrefetchStatePath is where the learned habit graph is persisted
+	// (~2-4MB JSONL, one small write per day). Loaded at startup so weekly
+	// habits survive reboots. Set to "" to disable persistence.
+	DomainPrefetchStatePath *string `mapstructure:"domain_prefetch_state_path" toml:"domain_prefetch_state_path,omitempty"`
+	// DomainPrefetchStateSaveHour is the local hour (0-23) for the daily
+	// graph save. Default 0 (midnight). -1 disables the timed save (a save
+	// on clean shutdown still happens).
+	DomainPrefetchStateSaveHour *int `mapstructure:"domain_prefetch_state_save_hour" toml:"domain_prefetch_state_save_hour,omitempty" validate:"omitempty,gte=-1,lte=23"`
 	// DomainPrefetchLocalHistoryEnabled controls whether ctrld maintains a
 	// local log of DNS queries it processes, then replays that log on
 	// startup to pre-seed the domain graph. Default true (when domain

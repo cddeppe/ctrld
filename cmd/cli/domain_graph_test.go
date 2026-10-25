@@ -39,7 +39,7 @@ func TestDomainGraph_DisabledByDefault(t *testing.T) {
                 assert.Equal(t, float64(5), dg.minCoOccur, "default minCoOccur should be 5")
                 assert.Equal(t, 5, dg.topK, "default topK should be 5")
                 assert.Equal(t, 10000, dg.maxGraphSize, "default maxGraphSize should be 10000")
-                assert.Equal(t, 0.95, dg.decayFactor, "default decayFactor should be 0.95")
+                assert.Equal(t, 72*time.Hour, dg.halfLife, "default halfLife should be 72h")
         })
 
         t.Run("explicit disable via min_co_occurrence=0", func(t *testing.T) {
@@ -249,47 +249,6 @@ func TestDomainGraph_LRU_Eviction(t *testing.T) {
         assert.NotContains(t, dg.coOccur, "b.com", "b.com should have been evicted")
         assert.Contains(t, dg.coOccur, "c.com", "c.com should still be present")
         assert.Contains(t, dg.coOccur, "d.com", "d.com should be present (just added)")
-}
-
-// TestDomainGraph_GC_Decay verifies that gcPass decays edge weights by
-// decayFactor and prunes edges that drop below the prune threshold.
-// Uses direct edge setup for predictable weights.
-func TestDomainGraph_GC_Decay(t *testing.T) {
-        cfg := testhelper.SampleConfig(t)
-        cfg.Service.CacheEnable = true
-        cfg.Service.CacheSize = 64
-        p := &prog{cfg: cfg}
-        cacher, _ := dnscache.NewLRUCache(64)
-        p.cache = cacher
-        p.um = newUpstreamMonitor(cfg)
-        dg := newDomainGraph(p)
-
-        // Set up edges: a→b weight 19, a→c weight 1.
-        //
-        // Decay math (decayFactor=0.95, pruneThreshold=0.5):
-        //   After 1 GC pass: a→b = 19*0.95 = 18.05, a→c = 1*0.95 = 0.95
-        //   Need ~14 GC passes for a→c to drop below 0.5 (1 * 0.95^14 ≈ 0.488).
-        dg.mu.Lock()
-        dg.addEdgeLocked("a.com", "b.com", 19)
-        dg.addEdgeLocked("a.com", "c.com", 1)
-        dg.mu.Unlock()
-
-        // Run GC. a→b decays to 18.05, a→c decays to 0.95 (still above 0.5).
-        dg.gcPass()
-        dg.mu.RLock()
-        assert.InDelta(t, 18.05, dg.coOccur["a.com"]["b.com"], 0.001, "a→b should decay to 18.05")
-        assert.InDelta(t, 0.95, dg.coOccur["a.com"]["c.com"], 0.001, "a→c should decay to 0.95")
-        dg.mu.RUnlock()
-
-        // Run many more GC passes to push a→c below 0.5 (will be pruned).
-        // 1 * 0.95^14 ≈ 0.488. Run 20 to be safe.
-        for i := 0; i < 20; i++ {
-                dg.gcPass()
-        }
-        dg.mu.RLock()
-        assert.NotContains(t, dg.coOccur["a.com"], "c.com", "a→c should be pruned after enough decay")
-        assert.Contains(t, dg.coOccur["a.com"], "b.com", "a→b should survive (started at 19)")
-        dg.mu.RUnlock()
 }
 
 // TestDomainGraph_RecordPrefetchFailure verifies that failed prefetches
