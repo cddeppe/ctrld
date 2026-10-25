@@ -297,7 +297,7 @@ func (ql *queryLogger) replayInto(dg *domainGraph, p *prog) {
                         Msg("domain-graph: error reading local query log")
         }
 
-        mainLog.Load().Info().Msgf("domain-graph: replayed %d queries (skipped %d) from local log %s with weight=%.1fx, graph now has %d domains",
+        mainLog.Load().Warn().Msgf("domain-graph: replayed %d queries (skipped %d) from local log %s with weight=%.1fx, graph now has %d domains",
                 replayed, skipped, ql.path, dg.historyWeight, dg.domainCount())
 
         // Log the top trigger domains so the user can see what was learned.

@@ -113,7 +113,7 @@ func (dg *domainGraph) saveState() {
 	dg.dirty = false
 	dg.mu.Unlock()
 	dg.lastSave = time.Now()
-	mainLog.Load().Info().Msgf("domain-graph: saved %d domains to %s", len(nodes), dg.statePath)
+	mainLog.Load().Warn().Msgf("domain-graph: saved %d domains to %s", len(nodes), dg.statePath)
 }
 
 // maybeSaveStateNightly saves the graph once per day at dg.stateHour
@@ -184,6 +184,6 @@ func (dg *domainGraph) loadState() {
 	dg.enforceCapLocked(time.Now())
 	dg.mu.Unlock()
 
-	mainLog.Load().Info().Msgf("domain-graph: restored %d domains from %s (graph has %d domains)",
+	mainLog.Load().Warn().Msgf("domain-graph: restored %d domains from %s (graph has %d domains)",
 		loaded, dg.statePath, dg.domainCount())
 }

@@ -463,10 +463,10 @@ func (dg *domainGraph) logTopTriggers() {
                 count = 10
         }
         if count == 0 {
-                mainLog.Load().Info().Msg("domain-graph: no trigger domains learned yet (need >= 2 neighbors above threshold)")
+                mainLog.Load().Warn().Msg("domain-graph: no trigger domains learned yet (need >= 2 neighbors above threshold)")
                 return
         }
-        mainLog.Load().Info().Msgf("domain-graph: %d trigger domains learned (showing top %d):", len(triggers), count)
+        mainLog.Load().Warn().Msgf("domain-graph: %d trigger domains learned (showing top %d):", len(triggers), count)
         for i := 0; i < count; i++ {
                 t := triggers[i]
                 // Cap the neighbor list display at 8 to keep logs readable.
@@ -474,7 +474,7 @@ func (dg *domainGraph) logTopTriggers() {
                 if len(display) > 8 {
                         display = display[:8]
                 }
-                mainLog.Load().Info().Msgf("  trigger %s (total_weight=%.1f) -> %v%s",
+                mainLog.Load().Warn().Msgf("  trigger %s (total_weight=%.1f) -> %v%s",
                         t.domain, t.totalWeight, display,
                         func() string {
                                 if len(t.neighbors) > 8 {
