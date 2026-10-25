@@ -280,8 +280,16 @@ func (ql *queryLogger) replayInto(dg *domainGraph, p *prog) {
                         skipped++
                         continue
                 }
-                // Replay with the configured history weight multiplier.
-                dg.recordQueryWithWeight(entry.ClientIP, entry.Domain, dg.historyWeight)
+                // Replay with the entry's ORIGINAL timestamp so the 60s
+                // co-occurrence window applies in log-time (not "everything
+                // at once"). This is critical: without it, all replayed queries
+                // get time.Now() and fall within the same 60s window, creating
+                // a clique where every domain co-occurs with every other domain.
+                at, tsErr := time.Parse(time.RFC3339Nano, entry.Timestamp)
+                if tsErr != nil {
+                        at = time.Now()
+                }
+                dg.recordQueryAt(entry.ClientIP, entry.Domain, at, dg.historyWeight)
                 replayed++
         }
         if err := scanner.Err(); err != nil {

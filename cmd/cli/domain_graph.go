@@ -166,7 +166,7 @@ func (dg *domainGraph) start(ctx context.Context) {
 // recordQuery records a LIVE client query (weight=1.0) — used by the
 // proxy() hook when a foreground resolve succeeds.
 func (dg *domainGraph) recordQuery(clientIP, domain string) {
-        dg.recordQueryWithWeight(clientIP, domain, 1.0)
+        dg.recordQueryAt(clientIP, domain, time.Now(), 1.0)
 }
 
 // recordQueryWithWeight records that clientIP queried domain at the current
@@ -184,21 +184,35 @@ func (dg *domainGraph) recordQuery(clientIP, domain string) {
 // O(N) where N = recent queries from this client (bounded by windowSec,
 // typically 1-20 entries). Cheap.
 func (dg *domainGraph) recordQueryWithWeight(clientIP, domain string, weight float64) {
+        dg.recordQueryAt(clientIP, domain, time.Now(), weight)
+}
+
+// recordQueryAt records that clientIP queried domain at time `at`,
+// incrementing co-occurrence edge weights by the given multiplier.
+// The `at` parameter is critical for replay: if all replayed queries
+// get time.Now(), they ALL fall within the 60s window, creating a
+// clique where every domain co-occurs with every other domain.
+// Using the original timestamp ensures only queries that were actually
+// within 60s of each other in real traffic co-occur.
+func (dg *domainGraph) recordQueryAt(clientIP, domain string, at time.Time, weight float64) {
         if !dg.enabled || clientIP == "" || domain == "" || weight <= 0 {
                 return
         }
-        now := time.Now()
+        // Guard against zero/garbage/future timestamps.
+        if at.IsZero() || at.After(time.Now()) {
+                at = time.Now()
+        }
         domain = normalizeDomain(domain)
 
         dg.mu.Lock()
         defer dg.mu.Unlock()
 
         // Update lastSeen for LRU tracking.
-        dg.lastSeen[domain] = now
+        dg.lastSeen[domain] = at
 
-        // Trim client's recent list to windowSec.
+        // Trim client's recent list to windowSec (measured from `at`).
         recent := dg.recent[clientIP]
-        cutoff := now.Add(-time.Duration(dg.windowSec) * time.Second)
+        cutoff := at.Add(-time.Duration(dg.windowSec) * time.Second)
         cutIdx := 0
         for cutIdx < len(recent) && recent[cutIdx].at.Before(cutoff) {
                 cutIdx++
@@ -228,11 +242,11 @@ func (dg *domainGraph) recordQueryWithWeight(clientIP, domain string, weight flo
         }
 
         // Append this query.
-        recent = append(recent, timedQuery{at: now, domain: domain})
+        recent = append(recent, timedQuery{at: at, domain: domain})
         dg.recent[clientIP] = recent
 
         // Enforce maxGraphSize via LRU eviction.
-        dg.enforceCapLocked(now)
+        dg.enforceCapLocked(at)
 }
 
 // addEdgeLocked increments the weight of the domain->neighbor edge by delta.
@@ -244,30 +258,35 @@ func (dg *domainGraph) addEdgeLocked(domain, neighbor string, delta float64) {
         dg.coOccur[domain][neighbor] += delta
 }
 
-// enforceCapLocked evicts the least-recently-seen domain when the graph
-// exceeds maxGraphSize. Caller must hold dg.mu.
+// enforceCapLocked evicts the least-recently-seen domains until the graph
+// is at or below maxGraphSize. Loops (not single-eviction) so a burst of
+// new domains above the cap gets resolved in one call. Skips "ghosts"
+// (domains in lastSeen but not in coOccur — left over from GC pruning)
+// so eviction actually reduces the graph size. Caller must hold dg.mu.
 func (dg *domainGraph) enforceCapLocked(now time.Time) {
-        if len(dg.coOccur) <= dg.maxGraphSize {
-                return
-        }
-        // Find the oldest domain by lastSeen. O(N) but only runs when over cap.
-        var oldestDomain string
-        var oldestTime time.Time
-        for d, t := range dg.lastSeen {
-                if oldestDomain == "" || t.Before(oldestTime) {
-                        oldestDomain = d
-                        oldestTime = t
+        for len(dg.coOccur) > dg.maxGraphSize {
+                var oldestDomain string
+                var oldestTime time.Time
+                for d, t := range dg.lastSeen {
+                        // Skip ghosts: domains in lastSeen but not in coOccur.
+                        if _, ok := dg.coOccur[d]; !ok {
+                                continue
+                        }
+                        if oldestDomain == "" || t.Before(oldestTime) {
+                                oldestDomain = d
+                                oldestTime = t
+                        }
                 }
+                if oldestDomain == "" {
+                        return // no non-ghost domains to evict
+                }
+                delete(dg.coOccur, oldestDomain)
+                for _, neighbors := range dg.coOccur {
+                        delete(neighbors, oldestDomain)
+                }
+                delete(dg.lastSeen, oldestDomain)
+                dg.evictions.Add(1)
         }
-        if oldestDomain == "" {
-                return
-        }
-        delete(dg.coOccur, oldestDomain)
-        for _, neighbors := range dg.coOccur {
-                delete(neighbors, oldestDomain)
-        }
-        delete(dg.lastSeen, oldestDomain)
-        dg.evictions.Add(1)
 }
 
 // predictNeighbors returns up to topK domains that have co-occurred with
@@ -514,6 +533,17 @@ func (dg *domainGraph) gcPass() {
                         delete(dg.coOccur, domain)
                 }
         }
+
+        // Prune lastSeen entries for domains that no longer have edges and
+        // haven't been queried within the window. Without this, lastSeen
+        // grows unboundedly (one entry per unique domain ever queried).
+        for d, t := range dg.lastSeen {
+                if t.Before(cutoff) {
+                        if neighbors, ok := dg.coOccur[d]; !ok || len(neighbors) == 0 {
+                                delete(dg.lastSeen, d)
+                        }
+                }
+        }
 }
 
 // normalizeDomain lowercases and strips the trailing dot, so "Google.com."
@@ -604,9 +634,14 @@ func (dg *domainGraph) maybePrefetchNeighbors(
                                 // path doesn't trigger more prefetching.
                                 prefetchCtx := context.WithValue(ctx, domainGraphKey{}, true)
                                 answer, err := resolveOne(prefetchCtx, upstreamConfig, neighborMsg)
-                                if err != nil || answer == nil || answer.Rcode != dns.RcodeSuccess {
+                                // Only NXDOMAIN unlearns — transient errors (timeout,
+                                // shutdown cancel, network) should NOT demote good patterns.
+                                if answer != nil && answer.Rcode == dns.RcodeNameError {
                                         dg.recordPrefetchFailure(queriedDomain, neighbor)
                                         return nil, nil
+                                }
+                                if err != nil || answer == nil || answer.Rcode != dns.RcodeSuccess {
+                                        return nil, nil // transient error, don't unlearn
                                 }
                                 // Cache the result — mirrors the foreground write path.
                                 now := time.Now()
