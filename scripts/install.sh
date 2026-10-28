@@ -283,10 +283,14 @@ if [ "$WILL_REPLACE_RUNNING" = "1" ] && [ "$NO_BACKUP" = "0" ] && [ -n "$EXISTIN
 fi
 
 # --- install (replace the binary) ---
+# Use cp + chmod instead of 'install' — the 'install' command is not
+# available on BusyBox systems (Ubiquiti routers, OpenWrt, etc.).
 if [ "$NEEDS_SUDO" = "1" ]; then
-    sudo install -m 0755 "$TMP_BIN" "$TARGET_BIN"
+    sudo cp "$TMP_BIN" "$TARGET_BIN"
+    sudo chmod 0755 "$TARGET_BIN"
 else
-    install -m 0755 "$TMP_BIN" "$TARGET_BIN"
+    cp "$TMP_BIN" "$TARGET_BIN"
+    chmod 0755 "$TARGET_BIN"
 fi
 
 # --- restart the service if we stopped it ---
