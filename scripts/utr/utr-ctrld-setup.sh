@@ -3,22 +3,28 @@
 # on the Ubiquiti UniFi Travel Router (UTR).
 #
 # PROBLEM:
-#   The UTR runs UniFi OS. The root filesystem is tmpfs (rebuilt on every boot
-#   from a read-only image), so installing a binary to /usr/local/bin/ctrld
-#   DOES NOT persist. Previously-tried paths (/etc/persistent/, /config/,
+#   The UTR runs UniFi OS with a tmpfs root filesystem. Files dropped in
+#   /usr/local/bin/, /etc/, /etc/systemd/system/, /etc/init.d/ are LOST on
+#   every reboot. Previously-tried paths (/etc/persistent/, /config/,
 #   MTD mounts) are EdgeOS-style paths that don't exist on UniFi OS.
 #
-# SOLUTION:
-#   1. /data/ is the persistent partition on UniFi OS — survives reboots AND
-#      firmware upgrades. Put the ctrld binary, config, and state file there.
-#   2. The unredacted/unifi-on-boot utility installs a systemd unit that
-#      executes /data/on_boot.d/*.sh on every boot AND restores itself after
-#      firmware upgrades. Drop a bootstrap script there to start ctrld at boot.
+#   The popular `unifi-utilities/unifios-utilities` on-boot installer
+#   explicitly refuses the UTR (only supports UDM/UDR/UX/UCG models), so
+#   we can't rely on /data/on_boot.d/ either.
 #
-# RUN FROM: a workstation, with the UTR reachable via SSH.
-#   scp this script to the UTR, then ssh in and run it as root.
-#   OR run it remotely:
-#     ssh root@<utr-ip> 'sh -' < utr-ctrld-setup.sh
+# SOLUTION:
+#   1. /data/ is the persistent partition on UniFi OS — survives reboots
+#      AND firmware upgrades. Put the ctrld binary, config, state file,
+#      log, pidfile, AND a bootstrap script under /data/ctrld/.
+#   2. Try every known UniFi OS persistence hook (best-effort, non-fatal):
+#         a. /data/on_boot.d/ctrld.sh           (if another utility created it)
+#         b. systemd unit via /data/systemd/    (UniFi OS 4.x persistence)
+#         c. systemd unit via /etc/systemd/system/  (won't survive reboot,
+#            but starts ctrld on this boot)
+#         d. cron @reboot entry                 (if cron present)
+#   3. ALWAYS also drop /data/ctrld/start.sh — a one-liner the user can run
+#      after every reboot to (re)start ctrld. This is the guaranteed fallback
+#      if no auto-start hook worked.
 #
 # USAGE:
 #   sh utr-ctrld-setup.sh                       # default: install latest prefetch
@@ -62,16 +68,21 @@ done
 
 CTRLED_DIR="/data/ctrld"
 ON_BOOT_DIR="/data/on_boot.d"
+DATA_SYSTEMD_DIR="/data/systemd"   # UniFi OS 4.x persistent systemd override dir
+ETC_SYSTEMD_DIR="/etc/systemd/system"
 CTRLED_BIN="${CTRLED_DIR}/ctrld"
 CTRLED_CFG="${CTRLED_DIR}/ctrld.toml"
 CTRLED_STATE="${CTRLED_DIR}/domain-graph.jsonl"
 CTRLED_LOGFILE="${CTRLED_DIR}/ctrld.log"
 CTRLED_PIDFILE="${CTRLED_DIR}/ctrld.pid"
-BOOTSTRAP="${ON_BOOT_DIR}/ctrld.sh"
+BOOTSTRAP="${CTRLED_DIR}/ctrld-bootstrap.sh"   # the canonical bootstrap (persistent)
+ON_BOOT_HOOK="${ON_BOOT_DIR}/ctrld.sh"          # best-effort hook (only works if /data/on_boot.d/ exists)
+SYSTEMD_UNIT_NAME="ctrld.service"
+SYSTEMD_UNIT_FILE="${ETC_SYSTEMD_DIR}/${SYSTEMD_UNIT_NAME}"
+SYSTEMD_UNIT_PERSISTENT="${DATA_SYSTEMD_DIR}/${SYSTEMD_UNIT_NAME}"
 
 # --- sanity: are we even on a UniFi OS device? ---
 if [ ! -d /data ] || [ ! -f /etc/os-release ] 2>/dev/null; then
-    # /data should always exist on UniFi OS — if not, this is the wrong device.
     if ! grep -qi unifi /etc/os-release 2>/dev/null \
         && ! grep -qi ubios /etc/os-release 2>/dev/null \
         && [ ! -d /data ]; then
@@ -96,67 +107,54 @@ if [ "$UNINSTALL" = "1" ]; then
         fi
         rm -f "$CTRLED_PIDFILE"
     fi
+    # Stop systemd unit if active
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl stop "$SYSTEMD_UNIT_NAME" 2>/dev/null || true
+        systemctl disable "$SYSTEMD_UNIT_NAME" 2>/dev/null || true
+    fi
     echo "    removing $CTRLED_BIN"
     rm -f "$CTRLED_BIN"
     echo "    removing $CTRLED_CFG"
     rm -f "$CTRLED_CFG"
     echo "    removing bootstrap $BOOTSTRAP"
     rm -f "$BOOTSTRAP"
+    echo "    removing on-boot hook $ON_BOOT_HOOK"
+    rm -f "$ON_BOOT_HOOK"
+    echo "    removing systemd unit"
+    rm -f "$SYSTEMD_UNIT_FILE" "$SYSTEMD_UNIT_PERSISTENT"
+    # Remove cron entry if present
+    if command -v crontab >/dev/null 2>&1; then
+        crontab -l 2>/dev/null | grep -v 'ctrld-bootstrap.sh' | crontab - 2>/dev/null || true
+    fi
     echo "    keeping state file: $CTRLED_STATE (in case you reinstall)"
     echo "    keeping log file:   $CTRLED_LOGFILE"
-    echo
-    echo "NOTE: unredacted/unifi-on-boot itself was NOT removed."
-    echo "      To remove it (and lose all /data/on_boot.d/ scripts):"
-    echo "        sh /data/unifi-on-boot/uninstall.sh"
     exit 0
 fi
 
 # --- main install ---
 echo "==> Installing ctrld $VERSION on UTR"
 echo "    persistent dir:  $CTRLED_DIR"
-echo "    bootstrap:      $BOOTSTRAP"
-echo "    listener:       $LISTENER"
-echo "    metrics:        $METRICS"
-[ -n "$RESOLVER_ID" ] && echo "    resolver-id:    $RESOLVER_ID"
+echo "    bootstrap:       $BOOTSTRAP"
+echo "    listener:        $LISTENER"
+echo "    metrics:         $METRICS"
+[ -n "$RESOLVER_ID" ] && echo "    resolver-id:     $RESOLVER_ID"
 
 if [ "$DRY_RUN" = "1" ]; then
-    echo "    [dry-run] would install unredacted/unifi-on-boot"
     echo "    [dry-run] would download ctrld $VERSION ($ARCH) -> $CTRLED_BIN"
     echo "    [dry-run] would write $CTRLED_CFG"
     echo "    [dry-run] would deploy bootstrap to $BOOTSTRAP"
+    echo "    [dry-run] would try on-boot hooks (best-effort, non-fatal):"
+    echo "              - $ON_BOOT_HOOK"
+    echo "              - $SYSTEMD_UNIT_PERSISTENT"
+    echo "              - $SYSTEMD_UNIT_FILE (this boot only)"
+    echo "              - cron @reboot"
     echo "    [dry-run] would start ctrld and verify"
     exit 0
 fi
 
-# --- 1. install unredacted/unifi-on-boot (gives us /data/on_boot.d/) ---
-if [ ! -d "$ON_BOOT_DIR" ] || [ ! -f /data/unifi-on-boot/installed ]; then
-    echo
-    echo "==> Installing unredacted/unifi-on-boot (provides /data/on_boot.d/ persistence)"
-    if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
-        echo "ERROR: neither curl nor wget found on UTR — cannot install unifi-on-boot." >&2
-        exit 1
-    fi
-    # The unredacted installer is mirrored at the unifi-utilities org.
-    INSTALL_URL="https://raw.githubusercontent.com/unredacted/unifi-on-boot/main/install.sh"
-    if command -v curl >/dev/null 2>&1; then
-        curl -fsSL "$INSTALL_URL" | sh -
-    else
-        wget -qO- "$INSTALL_URL" | sh -
-    fi
-    # Verify it actually installed.
-    if [ ! -d "$ON_BOOT_DIR" ]; then
-        echo "ERROR: unifi-on-boot install did not create $ON_BOOT_DIR" >&2
-        echo "       Try running the install.sh manually and check output." >&2
-        exit 1
-    fi
-    echo "    unifi-on-boot installed."
-else
-    echo "    unifi-on-boot already installed (skipping)."
-fi
+mkdir -p "$CTRLED_DIR"
 
-mkdir -p "$CTRLED_DIR" "$ON_BOOT_DIR"
-
-# --- 2. download ctrld binary to /data/ctrld/ ---
+# --- 1. download ctrld binary to /data/ctrld/ ---
 BIN_NAME="ctrld-${VERSION#v}-linux-${ARCH}"
 DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${VERSION}/${BIN_NAME}"
 SHA256_URL="https://github.com/${REPO}/releases/download/${VERSION}/SHA256SUMS.txt"
@@ -175,6 +173,9 @@ if command -v curl >/dev/null 2>&1; then
 elif command -v wget >/dev/null 2>&1; then
     wget -q -O "$TMP_BIN" "$DOWNLOAD_URL" || { echo "download failed" >&2; exit 1; }
     wget -q -O "$TMP_SHA"  "$SHA256_URL"  || echo "    (could not fetch SHA256SUMS, skipping verification)"
+else
+    echo "ERROR: neither curl nor wget found on UTR." >&2
+    exit 1
 fi
 
 # Verify SHA256 if checksums were fetched.
@@ -205,7 +206,7 @@ chmod 0755 "$CTRLED_BIN"
 echo "    installed: $CTRLED_BIN"
 "$CTRLED_BIN" --version 2>&1 | head -1 | sed 's/^/    /'
 
-# --- 3. write ctrld.toml (preserve existing if present) ---
+# --- 2. write ctrld.toml (preserve existing if present) ---
 write_config() {
     # Upstream: Control-D personal resolver (DoH) if --resolver-id was given,
     # else the public Control-D DNS for Families endpoint.
@@ -267,22 +268,18 @@ else
     echo "    upstream: $(grep '^  endpoint' "$CTRLED_CFG" | head -1 | tr -s ' ')"
 fi
 
-# --- 4. deploy the bootstrap script ---
+# --- 3. write the bootstrap script to /data/ctrld/ (persistent) ---
 echo
-echo "==> Deploying bootstrap to $BOOTSTRAP"
+echo "==> Writing bootstrap to $BOOTSTRAP"
 
-# The bootstrap script is shipped alongside this installer in the same
-# repo/directory. We try to find it; if not present, we write an inline copy.
-BOOTSTRAP_SRC="$(dirname "$0")/ctrld-bootstrap.sh"
-if [ -f "$BOOTSTRAP_SRC" ]; then
-    cp "$BOOTSTRAP_SRC" "$BOOTSTRAP"
-else
-    # Inline copy — keeps the installer self-contained when piped over SSH.
-    # Keep this in sync with scripts/utr/ctrld-bootstrap.sh.
-    cat > "$BOOTSTRAP" <<'BOOTSTRAP_EOF'
+cat > "$BOOTSTRAP" <<'BOOTSTRAP_EOF'
 #!/bin/sh
-# ctrld-bootstrap.sh — on_boot.d script for UniFi Travel Router (UTR).
-# Auto-deployed by utr-ctrld-setup.sh. See that script for full docs.
+# ctrld-bootstrap.sh — start ctrld on the UTR.
+# Auto-deployed by utr-ctrld-setup.sh. Safe to call multiple times —
+# detects an already-running ctrld and exits cleanly.
+#
+# This script is the canonical entry point. Other startup hooks
+# (/data/on_boot.d/, systemd, cron @reboot) all just exec this script.
 set -eu
 
 CTRLED_DIR="/data/ctrld"
@@ -295,6 +292,7 @@ CTRLED_STATE="${CTRLED_DIR}/domain-graph.jsonl"
 [ -x "$CTRLED_BIN" ] || { echo "[ctrld-bootstrap] binary missing: $CTRLED_BIN" >&2; exit 1; }
 [ -f "$CTRLED_CFG" ] || { echo "[ctrld-bootstrap] config missing: $CTRLED_CFG" >&2; exit 1; }
 
+# Already running?
 if [ -f "$CTRLED_PIDFILE" ]; then
     PID="$(cat "$CTRLED_PIDFILE" 2>/dev/null || true)"
     if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
@@ -306,11 +304,13 @@ if [ -f "$CTRLED_PIDFILE" ]; then
     rm -f "$CTRLED_PIDFILE"
 fi
 
+# Rotate log if >2MB.
 if [ -f "$CTRLED_LOGFILE" ]; then
     LOGSIZE="$(wc -c < "$CTRLED_LOGFILE" 2>/dev/null || echo 0)"
     [ "$LOGSIZE" -gt 2097152 ] && mv "$CTRLED_LOGFILE" "${CTRLED_LOGFILE}.1"
 fi
 
+# Wait for default route (upstream DoH needs internet).
 TRIES=0
 while [ "$TRIES" -lt 30 ]; do
     ip route show default 2>/dev/null | grep -q '^default' && break
@@ -333,14 +333,110 @@ fi
 [ -f "$CTRLED_STATE" ] && echo "[ctrld-bootstrap] state file: $CTRLED_STATE ($(wc -l < "$CTRLED_STATE" 2>/dev/null || echo 0) lines)"
 exit 0
 BOOTSTRAP_EOF
-fi
 
 chmod +x "$BOOTSTRAP"
 echo "    bootstrap installed."
 
-# --- 5. run the bootstrap now to start ctrld immediately ---
+# Also write a tiny /data/ctrld/start.sh wrapper for users to call after reboot
+# if the auto-start hooks below didn't work. One-liner: `sh /data/ctrld/start.sh`.
+START_WRAPPER="${CTRLED_DIR}/start.sh"
+cat > "$START_WRAPPER" <<EOF
+#!/bin/sh
+# One-liner to (re)start ctrld on the UTR.
+# Run this after a reboot if ctrld didn't auto-start.
+exec sh "$BOOTSTRAP" "\$@"
+EOF
+chmod +x "$START_WRAPPER"
+
+# --- 4. try every persistence hook we know about (best-effort, non-fatal) ---
 echo
-echo "==> Starting ctrld now (also auto-starts on every future boot)"
+echo "==> Trying auto-start hooks (best-effort, non-fatal)"
+
+# 4a. /data/on_boot.d/ — if it exists (some other utility may have created it),
+# drop our hook there.
+if [ -d "$ON_BOOT_DIR" ]; then
+    echo "    found $ON_BOOT_DIR — installing hook"
+    cat > "$ON_BOOT_HOOK" <<EOF
+#!/bin/sh
+exec sh "$BOOTSTRAP"
+EOF
+    chmod +x "$ON_BOOT_HOOK"
+    echo "    hook installed: $ON_BOOT_HOOK"
+else
+    echo "    $ON_BOOT_DIR does not exist — skipping (no unifi-on-boot detected)"
+fi
+
+# 4b. systemd unit — try to install at /data/systemd/ (persistent on
+# UniFi OS 4.x if it exists) AND at /etc/systemd/system/ (works for this
+# boot even though it's tmpfs).
+HAVE_SYSTEMD=0
+if command -v systemctl >/dev/null 2>&1; then
+    HAVE_SYSTEMD=1
+fi
+
+if [ "$HAVE_SYSTEMD" = "1" ]; then
+    echo "    systemd detected — writing $SYSTEMD_UNIT_NAME"
+
+    SYSTEMD_UNIT_BODY="[Unit]
+Description=ctrld DNS proxy (cddeppe/ctrld fork with domain-graph prefetch)
+After=network-online.target
+Wants=network-online.target
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=$CTRLED_BIN run --config $CTRLED_CFG
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=10
+StandardOutput=append:$CTRLED_LOGFILE
+StandardError=append:$CTRLED_LOGFILE
+PIDFile=$CTRLED_PIDFILE
+
+[Install]
+WantedBy=multi-user.target"
+
+    # Try /data/systemd/ first (persistent on UniFi OS 4.x).
+    if [ -d "$DATA_SYSTEMD_DIR" ]; then
+        echo "    /data/systemd exists — writing persistent unit there"
+        echo "$SYSTEMD_UNIT_BODY" > "$SYSTEMD_UNIT_PERSISTENT"
+        # Symlink into /etc/systemd/system/ so systemd loads it this boot.
+        ln -sf "$SYSTEMD_UNIT_PERSISTENT" "$SYSTEMD_UNIT_FILE"
+    else
+        # /data/systemd doesn't exist on this firmware. Write the unit to
+        # /etc/systemd/system/ — it WILL be lost on reboot, but starting
+        # it now at least gets ctrld running for this session.
+        echo "    /data/systemd does NOT exist — writing to $SYSTEMD_UNIT_FILE (tmpfs, lost on reboot)"
+        echo "    You will need to run 'sh $START_WRAPPER' after each reboot, OR"
+        echo "    tell us which path is persistent on your firmware (see below)."
+        mkdir -p "$ETC_SYSTEMD_DIR"
+        echo "$SYSTEMD_UNIT_BODY" > "$SYSTEMD_UNIT_FILE"
+    fi
+
+    systemctl daemon-reload 2>/dev/null || true
+    systemctl enable "$SYSTEMD_UNIT_NAME" 2>/dev/null || true
+else
+    echo "    no systemd detected — skipping systemd unit"
+fi
+
+# 4c. cron @reboot — if cron is present, add a @reboot line.
+if command -v crontab >/dev/null 2>&1; then
+    echo "    cron detected — adding @reboot entry"
+    # Add our entry if not already present.
+    if ! crontab -l 2>/dev/null | grep -q 'ctrld-bootstrap.sh'; then
+        (crontab -l 2>/dev/null; echo "@reboot sh $BOOTSTRAP # ctrld-bootstrap") | crontab -
+        echo "    cron @reboot entry added"
+    else
+        echo "    cron @reboot entry already present"
+    fi
+else
+    echo "    no cron detected — skipping cron @reboot"
+fi
+
+# --- 5. start ctrld now (via the bootstrap, so the path is exercised) ---
+echo
+echo "==> Starting ctrld now"
 sh "$BOOTSTRAP" || {
     echo "ERROR: bootstrap failed. Check $CTRLED_LOGFILE" >&2
     exit 1
@@ -364,21 +460,27 @@ fi
 # --- 7. summary ---
 echo
 echo "==> DONE"
-echo "    binary:        $CTRLED_BIN  (persistent)"
-echo "    config:        $CTRLED_CFG  (persistent)"
-echo "    state file:    $CTRLED_STATE  (persistent, grows over time)"
-echo "    log:           $CTRLED_LOGFILE"
-echo "    bootstrap:     $BOOTSTRAP  (runs on every boot via unifi-on-boot)"
+echo "    binary:         $CTRLED_BIN  (persistent)"
+echo "    config:         $CTRLED_CFG  (persistent)"
+echo "    state file:     $CTRLED_STATE  (persistent — habits accumulate across reboots)"
+echo "    log:            $CTRLED_LOGFILE"
+echo "    bootstrap:      $BOOTSTRAP  (persistent)"
+echo "    start wrapper:  $START_WRAPPER  (persistent — call after reboot if needed)"
 echo
-echo "Next steps:"
-echo "  1. Reboot the UTR to confirm ctrld auto-starts:"
-echo "       reboot"
-echo "  2. After reboot, verify ctrld is running:"
-echo "       cat $CTRLED_PIDFILE && kill -0 \$(cat $CTRLED_PIDFILE) && echo OK"
-echo "  3. Check prefetch is learning (after ~5 min of DNS traffic):"
-echo "       wc -l $CTRLED_STATE"
-echo "  4. Watch metrics:"
-echo "       curl -s http://${METRICS_HOST}:${METRICS_PORT}/metrics | grep ctrld_"
+echo "AUTO-START HOOKS TRIED (best-effort):"
+[ -f "$ON_BOOT_HOOK" ] && echo "  [x] /data/on_boot.d/ctrld.sh  (if unifi-on-boot was installed elsewhere)"
+[ -f "$SYSTEMD_UNIT_FILE" ] && echo "  [x] systemd unit (this boot only — /etc/systemd/system/ is tmpfs)"
+[ -f "$SYSTEMD_UNIT_PERSISTENT" ] && echo "  [x] systemd unit (/data/systemd/ — persistent)"
+command -v crontab >/dev/null 2>&1 && echo "  [x] cron @reboot entry"
+echo
+echo "GUARANTEED FALLBACK (always works):"
+echo "  After every reboot, if ctrld is not running, just run:"
+echo "    sh $START_WRAPPER"
+echo
+echo "VERIFY AFTER REBOOT:"
+echo "  1. cat $CTRLED_PIDFILE && kill -0 \$(cat $CTRLED_PIDFILE) && echo OK"
+echo "  2. curl -s http://${METRICS_HOST}:${METRICS_PORT}/metrics | grep ctrld_build_info"
+echo "  3. wc -l $CTRLED_STATE   # after ~5 min of DNS traffic"
 echo
 echo "To uninstall later:"
 echo "  sh $0 --uninstall"
