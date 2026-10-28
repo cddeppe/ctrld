@@ -63,8 +63,9 @@ if [ -z "$OS" ]; then
 fi
 if [ -z "$ARCH" ]; then
     case "$(uname -m)" in
-        x86_64|amd64)  ARCH="amd64" ;;
-        arm64|aarch64) ARCH="arm64" ;;
+        x86_64|amd64)    ARCH="amd64" ;;
+        arm64|aarch64)   ARCH="arm64" ;;
+        armv7l|armv6l|arm) ARCH="arm" ;;
         *) echo "Unsupported arch: $(uname -m)" >&2; exit 1 ;;
     esac
 fi
