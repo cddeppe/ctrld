@@ -233,6 +233,18 @@ type ServiceConfig struct {
 	CacheTTLOverride        int            `mapstructure:"cache_ttl_override" toml:"cache_ttl_override,omitempty"`
 	CacheServeStale         bool           `mapstructure:"cache_serve_stale" toml:"cache_serve_stale,omitempty"`
 	CacheFlushDomains       []string       `mapstructure:"cache_flush_domains" toml:"cache_flush_domains" validate:"max=256"`
+	// DomainPrefetchMinCoOccurrence is the minimum co-occurrence weight
+	DomainPrefetchMinCoOccurrence *int `mapstructure:"domain_prefetch_min_co_occurrence" toml:"domain_prefetch_min_co_occurrence,omitempty" validate:"omitempty,gte=0"`
+	DomainPrefetchTopK *int `mapstructure:"domain_prefetch_top_k" toml:"domain_prefetch_top_k,omitempty" validate:"omitempty,gte=0"`
+	DomainPrefetchWindowSec *int `mapstructure:"domain_prefetch_window_sec" toml:"domain_prefetch_window_sec,omitempty" validate:"omitempty,gte=0"`
+	DomainPrefetchMaxGraphSize *int `mapstructure:"domain_prefetch_max_graph_size" toml:"domain_prefetch_max_graph_size,omitempty" validate:"omitempty,gte=0"`
+	DomainPrefetchHistoryWeight *float64 `mapstructure:"domain_prefetch_history_weight" toml:"domain_prefetch_history_weight,omitempty" validate:"omitempty,gt=0"`
+	DomainPrefetchMemoryHalfLifeHours *int `mapstructure:"domain_prefetch_memory_half_life_hours" toml:"domain_prefetch_memory_half_life_hours,omitempty" validate:"omitempty,gt=0"`
+	DomainPrefetchStatePath *string `mapstructure:"domain_prefetch_state_path" toml:"domain_prefetch_state_path,omitempty"`
+	DomainPrefetchStateSaveHour *int `mapstructure:"domain_prefetch_state_save_hour" toml:"domain_prefetch_state_save_hour,omitempty" validate:"omitempty,gte=-1,lte=23"`
+	DomainPrefetchLocalHistoryEnabled *bool `mapstructure:"domain_prefetch_local_history_enabled" toml:"domain_prefetch_local_history_enabled,omitempty"`
+	DomainPrefetchLocalHistoryPath *string `mapstructure:"domain_prefetch_local_history_path" toml:"domain_prefetch_local_history_path,omitempty"`
+	DomainPrefetchLocalHistoryMaxSizeMB *int `mapstructure:"domain_prefetch_local_history_max_size_mb" toml:"domain_prefetch_local_history_max_size_mb,omitempty" validate:"omitempty,gt=0"`
 	MaxConcurrentRequests   *int           `mapstructure:"max_concurrent_requests" toml:"max_concurrent_requests,omitempty" validate:"omitempty,gte=0"`
 	DHCPLeaseFile           string         `mapstructure:"dhcp_lease_file_path" toml:"dhcp_lease_file_path" validate:"omitempty,file"`
 	DHCPLeaseFileFormat     string         `mapstructure:"dhcp_lease_file_format" toml:"dhcp_lease_file_format" validate:"required_unless=DHCPLeaseFile '',omitempty,oneof=dnsmasq isc-dhcp kea-dhcp4"`

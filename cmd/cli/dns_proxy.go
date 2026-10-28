@@ -711,7 +711,7 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 		if req.msg.Question[0].Qtype == dns.TypeAAAA {
 			dns64Prefix, dns64Active = p.activeDNS64Prefix()
 		}
-		for _, upstream := range upstreams {
+		for i, upstream := range upstreams {
 			answer, stale, hit, dns64Hit, dns64Bypass := p.cachedResponse(req.msg, upstream, dns64Prefix, dns64Active, time.Now())
 			if stale != nil {
 				staleAnswer = stale
@@ -728,6 +728,23 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 				ctrld.Log(ctx, mainLog.Load().Debug(), "hit cached response")
 			}
 			p.health.countCacheHit()
+			// Feed the domain graph on cache HITS too.
+			if p.domainGraph != nil {
+				cIP := ""
+				if req.ci != nil {
+					cIP = req.ci.IP
+				}
+				var uc *ctrld.UpstreamConfig
+				if i < len(upstreamConfigs) {
+					uc = upstreamConfigs[i]
+				}
+				if scheduled := p.domainGraph.maybePrefetchNeighbors(
+					ctx, p, cIP, req.msg.Question[0].Name,
+					req.msg.Question[0].Qtype, upstream, uc,
+				); scheduled > 0 {
+					statsDomainPrefetchPredictions.Add(float64(scheduled))
+				}
+			}
 			res.answer = answer
 			res.cached = true
 			return res
@@ -1003,6 +1020,26 @@ func (p *prog) proxy(ctx context.Context, req *proxyRequest) *proxyResponse {
 			if cacheable {
 				p.addCachedResponse(dnscache.NewKey(req.msg, upstreams[n]), answer)
 				ctrld.Log(ctx, mainLog.Load().Debug(), "add cached response")
+				// Feed the domain graph on cache misses (after successful resolve).
+				if p.domainGraph != nil {
+					cIP := ""
+					if req.ci != nil {
+						cIP = req.ci.IP
+					}
+					if scheduled := p.domainGraph.maybePrefetchNeighbors(
+						ctx, p, cIP, req.msg.Question[0].Name,
+						req.msg.Question[0].Qtype, upstreams[n], upstreamConfig,
+					); scheduled > 0 {
+						statsDomainPrefetchPredictions.Add(float64(scheduled))
+					}
+				}
+				if p.queryLog != nil {
+					cIP := ""
+					if req.ci != nil {
+						cIP = req.ci.IP
+					}
+					p.queryLog.appendQuery(cIP, req.msg.Question[0].Name, req.msg.Question[0].Qtype)
+				}
 			}
 			hostname := ""
 			if req.ci != nil {

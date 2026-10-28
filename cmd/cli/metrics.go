@@ -146,6 +146,8 @@ func (p *prog) runMetricsServer(ctx context.Context, reloadCh chan struct{}) {
 		statsVersion.WithLabelValues(commit, runtime.Version(), curVersion()).Inc()
 		reg.MustRegister(statsTimeStart)
 		statsTimeStart.Set(float64(time.Now().Unix()))
+		reg.MustRegister(statsDomainPrefetchPredictions)
+		reg.MustRegister(statsLocalHistoryReplays)
 		mainLog.Load().Debug().Msgf("starting metrics server on: %s", addr)
 		if err := ms.start(); err != nil {
 			mainLog.Load().Warn().Err(err).Msg("could not start metrics server")

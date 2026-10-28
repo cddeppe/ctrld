@@ -49,6 +49,19 @@ var statsClientQueriesCount = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Help: "Total number queries of a client.",
 }, []string{metricsLabelClientSourceIP, metricsLabelClientMac, metricsLabelClientHostname})
 
+
+// statsDomainPrefetchPredictions counts speculative prefetches scheduled.
+var statsDomainPrefetchPredictions = prometheus.NewCounter(prometheus.CounterOpts{
+	Name: "ctrld_domain_prefetch_predictions_total",
+	Help: "Total number of speculative prefetches scheduled by the domain-graph predictor.",
+})
+
+// statsLocalHistoryReplays counts queries replayed from local log.
+var statsLocalHistoryReplays = prometheus.NewCounter(prometheus.CounterOpts{
+	Name: "ctrld_local_history_replays_total",
+	Help: "Total number of queries replayed from the local query log into the domain graph on startup.",
+})
+
 // WithLabelValuesInc increases prometheus counter by 1 if query stats is enabled.
 func (p *prog) WithLabelValuesInc(c *prometheus.CounterVec, lvs ...string) {
 	if p.metricsQueryStats.Load() {
