@@ -76,7 +76,7 @@ if [ "$OS" != "linux" ] && [ "$OS" != "darwin" ]; then
     echo "  git clone https://github.com/$REPO && cd ctrld && git checkout $VERSION && go build ./cmd/ctrld" >&2
     exit 1
 fi
-if [ "$ARCH" != "amd64" ] && [ "$ARCH" != "arm64" ]; then
+if [ "$ARCH" != "amd64" ] && [ "$ARCH" != "arm64" ] && [ "$ARCH" != "arm" ]; then
     echo "No prebuilt binary for ARCH=$ARCH. Build from source:" >&2
     echo "  git clone https://github.com/$REPO && cd ctrld && git checkout $VERSION && go build ./cmd/ctrld" >&2
     exit 1
